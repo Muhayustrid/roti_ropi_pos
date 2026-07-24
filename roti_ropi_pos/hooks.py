@@ -8,7 +8,7 @@ app_license = "mit"
 # Apps
 # ------------------
 
-# required_apps = []
+required_apps = ["erpnext", "bakery_manufacturing"]
 
 # Each item in the list will be shown as an app in the apps page
 # add_to_apps_screen = [
@@ -149,23 +149,9 @@ app_license = "mit"
 # Scheduled Tasks
 # ---------------
 
-# scheduler_events = {
-# 	"all": [
-# 		"roti_ropi_pos.tasks.all"
-# 	],
-# 	"daily": [
-# 		"roti_ropi_pos.tasks.daily"
-# 	],
-# 	"hourly": [
-# 		"roti_ropi_pos.tasks.hourly"
-# 	],
-# 	"weekly": [
-# 		"roti_ropi_pos.tasks.weekly"
-# 	],
-# 	"monthly": [
-# 		"roti_ropi_pos.tasks.monthly"
-# 	],
-# }
+scheduler_events = {
+	"daily": ["roti_ropi_pos.mobile_pos.idempotency.delete_expired_requests"],
+}
 
 # Testing
 # -------
@@ -193,6 +179,14 @@ app_license = "mit"
 # override_doctype_dashboards = {
 # 	"Task": "roti_ropi_pos.task.get_dashboard_data"
 # }
+
+# Fixtures
+# --------
+# Read-only audit custom fields persisted on POS business documents so
+# transaction id correlation survives deletion of Mobile POS Request rows.
+fixtures = [
+	{"dt": "Custom Field", "filters": [["fieldname", "in", ["custom_mobile_pos_transaction_id"]]]},
+]
 
 # exempt linked doctypes from being automatically cancelled
 #
@@ -255,4 +249,3 @@ app_license = "mit"
 # ------------
 # List of apps whose translatable strings should be excluded from this app's translations.
 # ignore_translatable_strings_from = []
-
