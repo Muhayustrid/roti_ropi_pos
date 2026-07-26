@@ -186,6 +186,24 @@ scheduler_events = {
 # transaction id correlation survives deletion of Mobile POS Request rows.
 fixtures = [
 	{"dt": "Custom Field", "filters": [["fieldname", "in", ["custom_mobile_pos_transaction_id"]]]},
+	{"dt": "Role", "filters": [["role_name", "=", "Mobile POS Cashier"]]},
+	{
+		"dt": "Custom DocPerm",
+		"filters": [
+			[
+				"parent",
+				"in",
+				[
+					"POS Profile",
+					"POS Opening Entry",
+					"POS Invoice",
+					"POS Closing Entry",
+					"Customer",
+					"Item",
+				],
+			]
+		],
+	},
 ]
 
 # exempt linked doctypes from being automatically cancelled
@@ -234,9 +252,9 @@ fixtures = [
 # Authentication and authorization
 # --------------------------------
 
-# auth_hooks = [
-# 	"roti_ropi_pos.auth.validate"
-# ]
+auth_hooks = [
+	"roti_ropi_pos.mobile_pos.auth_hook.validate_mobile_api_scope",
+]
 
 # Automatically update python controller files with type annotations for this app.
 # export_python_type_annotations = True
