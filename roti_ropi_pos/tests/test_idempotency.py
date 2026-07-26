@@ -250,6 +250,15 @@ class TestIdempotency(IntegrationTestCase):
 		self.assertEqual(sum(1 for r in responses if r["meta"]["replayed"]), 19)
 
 	def test_twenty_concurrent_attempts_create_one_opening_and_one_request(self):
+		user = frappe.session.user
+		request = getattr(frappe.local, "request", None)
+		try:
+			self._assert_twenty_concurrent_attempts_create_one_opening_and_one_request()
+		finally:
+			_restore_request(request)
+			frappe.set_user(user)
+
+	def _assert_twenty_concurrent_attempts_create_one_opening_and_one_request(self):
 		from frappe.core.doctype.user_permission.test_user_permission import create_user
 
 		user = create_user(
@@ -324,23 +333,18 @@ class TestIdempotency(IntegrationTestCase):
 		self.assertTrue(all(row["data"]["opening_session"]["name"] == opening_name for row in responses))
 
 		frappe.set_user(user)
-		request = getattr(frappe.local, "request", None)
-		try:
-			frappe.local.request = frappe._dict(headers={"X-Idempotency-Key": key})
-			for _ in in_progress:
-				retry = execute_idempotent(
-					"v1.sessions.open",
-					{
-						"pos_profile": profile.name,
-						"opening_balances": [{"mode_of_payment": "Cash", "opening_amount": Decimal("0")}],
-					},
-					lambda transaction_id: self.fail("retry must replay, not execute"),
-				)
-				self.assertTrue(retry["meta"]["replayed"])
-				self.assertEqual(retry["data"]["opening_session"]["name"], opening_name)
-		finally:
-			_restore_request(request)
-			frappe.set_user("Administrator")
+		frappe.local.request = frappe._dict(headers={"X-Idempotency-Key": key})
+		for _ in in_progress:
+			retry = execute_idempotent(
+				"v1.sessions.open",
+				{
+					"pos_profile": profile.name,
+					"opening_balances": [{"mode_of_payment": "Cash", "opening_amount": Decimal("0")}],
+				},
+				lambda transaction_id: self.fail("retry must replay, not execute"),
+			)
+			self.assertTrue(retry["meta"]["replayed"])
+			self.assertEqual(retry["data"]["opening_session"]["name"], opening_name)
 
 	def test_processing_request_blocks_concurrent_same_key(self):
 		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})
