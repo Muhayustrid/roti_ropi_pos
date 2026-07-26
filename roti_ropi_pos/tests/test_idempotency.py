@@ -329,6 +329,44 @@ class TestIdempotency(IntegrationTestCase):
 		self.assertGreaterEqual(deleted, 1)
 		self.assertFalse(frappe.db.exists("Mobile POS Request", doc.name))
 
+	def test_delete_expired_preserves_leased_terminal_request(self):
+		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})
+		doc = frappe.get_doc(
+			{
+				"doctype": "Mobile POS Request",
+				"scope_key": _scope_key(KEY_DEL2, "v1.sales.submit"),
+				"idempotency_key": KEY_DEL2,
+				"endpoint": "v1.sales.submit",
+				"request_hash": request_hash,
+				"user": frappe.session.user,
+				"status": "Completed",
+				"expires_at": "2026-01-02 00:00:00",
+				"lease_expires_at": "2026-01-01 00:00:00",
+			}
+		)
+		doc.insert(ignore_permissions=True, ignore_links=True)
+		delete_expired_requests()
+		self.assertTrue(frappe.db.exists("Mobile POS Request", doc.name))
+
+	def test_delete_expired_preserves_recovery_phase(self):
+		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})
+		doc = frappe.get_doc(
+			{
+				"doctype": "Mobile POS Request",
+				"scope_key": _scope_key(KEY_DEL3, "v1.sales.submit"),
+				"idempotency_key": KEY_DEL3,
+				"endpoint": "v1.sales.submit",
+				"request_hash": request_hash,
+				"user": frappe.session.user,
+				"status": "Rejected",
+				"phase": "SubmitStarted",
+				"expires_at": "2026-01-02 00:00:00",
+			}
+		)
+		doc.insert(ignore_permissions=True, ignore_links=True)
+		delete_expired_requests()
+		self.assertTrue(frappe.db.exists("Mobile POS Request", doc.name))
+
 	def test_delete_expired_preserves_processing_and_held(self):
 		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})
 		processing = frappe.get_doc(

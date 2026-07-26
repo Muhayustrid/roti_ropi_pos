@@ -276,6 +276,17 @@ def execute_idempotent(
 		raise
 
 
+def _is_cleanup_candidate(request, now) -> bool:
+	return bool(
+		request.status in {"Completed", "Rejected"}
+		and request.expires_at
+		and request.expires_at <= now
+		and not request.retention_hold
+		and not request.lease_expires_at
+		and not request.phase
+	)
+
+
 def delete_expired_requests(batch_size: int = CLEANUP_BATCH_SIZE) -> int:
 	"""Delete cleanup-eligible terminal Mobile POS Request rows.
 
@@ -299,7 +310,9 @@ def delete_expired_requests(batch_size: int = CLEANUP_BATCH_SIZE) -> int:
 	)
 	deleted = 0
 	for name in names:
-		request = frappe.get_doc(DOCTYPE, name)
+		request = frappe.get_doc(DOCTYPE, name, for_update=True)
+		if not _is_cleanup_candidate(request, now):
+			continue
 		if request.reference_doctype and request.reference_name:
 			persisted = frappe.db.get_value(
 				request.reference_doctype,
