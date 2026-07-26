@@ -139,21 +139,24 @@ def _resolve_committed_request(scope_key: str, request_hash: str, operation_id: 
 	retried up to ``CONFLICT_RESOLUTION_ATTEMPTS`` times with a short delay.
 	"""
 	last_status: str | None = None
+	last_deadlocked = False
 	for attempt in range(CONFLICT_RESOLUTION_ATTEMPTS):
 		try:
 			existing = _get_existing_request(scope_key, for_update=True)
+			last_deadlocked = False
 		except frappe.QueryDeadlockError:
 			existing = None
+			last_deadlocked = True
 		if existing:
 			_raise_if_hash_conflict(existing, request_hash, operation_id)
 			if existing.status == "Completed":
 				return replay_response(existing)
 			last_status = existing.status
-		else:
+		elif not last_deadlocked:
 			last_status = None
 		if attempt < CONFLICT_RESOLUTION_ATTEMPTS - 1:
 			time.sleep(CONFLICT_RESOLUTION_DELAY_SECONDS)
-	if last_status == "Processing":
+	if last_status == "Processing" or last_deadlocked:
 		raise _request_in_progress(operation_id)
 	raise MobilePOSAPIError(
 		"IDEMPOTENCY_INVARIANT",

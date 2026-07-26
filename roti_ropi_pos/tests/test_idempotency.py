@@ -58,10 +58,10 @@ def _run_open_attempt(site, user, profile_name, key, barrier):
 					),
 				)
 			except MobilePOSAPIError as error:
-				if error.code != "REQUEST_IN_PROGRESS":
+				if error.code != "REQUEST_IN_PROGRESS" or not error.retryable:
 					raise
 				frappe.db.rollback()
-				return {"error_code": error.code}
+				return {"error_code": error.code, "retryable": error.retryable}
 		frappe.db.commit()
 		return response
 	except Exception:
@@ -249,6 +249,7 @@ class TestIdempotency(IntegrationTestCase):
 		replays = [row for row in responses if row["meta"]["replayed"]]
 		self.assertEqual(len(first), 1)
 		self.assertGreaterEqual(len(replays), 1)
+		self.assertTrue(all(row["retryable"] for row in in_progress))
 		self.assertEqual(len(responses) + len(in_progress), 20)
 		self.assertEqual(
 			frappe.db.count(
@@ -454,6 +455,30 @@ class TestIdempotency(IntegrationTestCase):
 		self.assertTrue(result["meta"]["replayed"])
 		self.assertEqual(calls, [True, True])
 		sleep_mock.assert_called_once()
+
+	def test_resolve_committed_request_repeated_deadlock_raises_retryable(self):
+		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})
+		calls = []
+
+		def fake_get_existing(scope_key, *, for_update=False):
+			calls.append(for_update)
+			raise frappe.QueryDeadlockError("deadlock")
+
+		with (
+			patch(
+				"roti_ropi_pos.mobile_pos.idempotency._get_existing_request",
+				side_effect=fake_get_existing,
+			),
+			patch("roti_ropi_pos.mobile_pos.idempotency.time.sleep") as sleep_mock,
+		):
+			with self.assertRaises(MobilePOSAPIError) as error:
+				_resolve_committed_request(
+					_scope_key(KEY, "v1.sales.submit"), request_hash, "v1.sales.submit"
+				)
+		self.assertEqual(error.exception.code, "REQUEST_IN_PROGRESS")
+		self.assertTrue(error.exception.retryable)
+		self.assertEqual(calls, [True] * CONFLICT_RESOLUTION_ATTEMPTS)
+		self.assertEqual(sleep_mock.call_count, CONFLICT_RESOLUTION_ATTEMPTS - 1)
 
 	def test_resolve_committed_request_bounded_processing_raises_retryable(self):
 		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})
