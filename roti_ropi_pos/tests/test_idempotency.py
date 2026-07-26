@@ -6,8 +6,10 @@ from frappe.tests import IntegrationTestCase
 
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.mobile_pos.idempotency import (
+	CONFLICT_RESOLUTION_ATTEMPTS,
 	MutationResult,
 	_create_processing_request,
+	_resolve_committed_request,
 	_scope_key,
 	canonical_hash,
 	delete_expired_requests,
@@ -253,6 +255,151 @@ class TestIdempotency(IntegrationTestCase):
 		delete_expired_requests()
 		self.assertTrue(frappe.db.exists("Mobile POS Request", processing.name))
 		self.assertTrue(frappe.db.exists("Mobile POS Request", held.name))
+
+	def test_resolve_committed_request_missing_then_completed_uses_locking_read(self):
+		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})
+		completed = frappe.get_doc(
+			{
+				"doctype": "Mobile POS Request",
+				"scope_key": _scope_key(KEY, "v1.sales.submit"),
+				"idempotency_key": KEY,
+				"endpoint": "v1.sales.submit",
+				"request_hash": request_hash,
+				"user": frappe.session.user,
+				"status": "Completed",
+				"reference_doctype": "POS Invoice",
+				"reference_name": "INV-1",
+				"http_status": 201,
+				"response_json": frappe.as_json(
+					{"ok": True, "data": {"name": "INV-1"}, "meta": {"api_version": "v1"}}
+				),
+				"resolved_at": "2026-01-01 00:00:00",
+				"expires_at": "2026-01-02 00:00:00",
+				"audit_reference_written": 1,
+			}
+		)
+		completed.insert(ignore_permissions=True, ignore_links=True)
+		calls = []
+
+		def fake_get_existing(scope_key, *, for_update=False):
+			calls.append(for_update)
+			if len(calls) == 1:
+				return None
+			return completed
+
+		with (
+			patch(
+				"roti_ropi_pos.mobile_pos.idempotency._get_existing_request",
+				side_effect=fake_get_existing,
+			),
+			patch("roti_ropi_pos.mobile_pos.idempotency.time.sleep") as sleep_mock,
+		):
+			result = _resolve_committed_request(
+				_scope_key(KEY, "v1.sales.submit"), request_hash, "v1.sales.submit"
+			)
+		self.assertEqual(result["data"], {"name": "INV-1"})
+		self.assertTrue(result["meta"]["replayed"])
+		self.assertTrue(calls)
+		self.assertTrue(all(for_update is True for for_update in calls))
+		self.assertGreaterEqual(sleep_mock.call_count, 1)
+
+	def test_resolve_committed_request_bounded_processing_raises_retryable(self):
+		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})
+		processing = frappe.get_doc(
+			{
+				"doctype": "Mobile POS Request",
+				"scope_key": _scope_key(KEY, "v1.sales.submit"),
+				"idempotency_key": KEY,
+				"endpoint": "v1.sales.submit",
+				"request_hash": request_hash,
+				"user": frappe.session.user,
+				"status": "Processing",
+			}
+		)
+		processing.insert(ignore_permissions=True, ignore_links=True)
+		calls = []
+
+		def fake_get_existing(scope_key, *, for_update=False):
+			calls.append(for_update)
+			return processing
+
+		with (
+			patch(
+				"roti_ropi_pos.mobile_pos.idempotency._get_existing_request",
+				side_effect=fake_get_existing,
+			),
+			patch("roti_ropi_pos.mobile_pos.idempotency.time.sleep") as sleep_mock,
+		):
+			with self.assertRaises(MobilePOSAPIError) as error:
+				_resolve_committed_request(
+					_scope_key(KEY, "v1.sales.submit"), request_hash, "v1.sales.submit"
+				)
+		self.assertEqual(error.exception.code, "REQUEST_IN_PROGRESS")
+		self.assertTrue(error.exception.retryable)
+		self.assertEqual(len(calls), CONFLICT_RESOLUTION_ATTEMPTS)
+		self.assertTrue(all(for_update is True for for_update in calls))
+		self.assertEqual(sleep_mock.call_count, CONFLICT_RESOLUTION_ATTEMPTS - 1)
+
+	def test_resolve_committed_request_hash_mismatch_raises_immediately(self):
+		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})
+		other = frappe.get_doc(
+			{
+				"doctype": "Mobile POS Request",
+				"scope_key": _scope_key(KEY, "v1.sales.submit"),
+				"idempotency_key": KEY,
+				"endpoint": "v1.sales.submit",
+				"request_hash": "different-hash",
+				"user": frappe.session.user,
+				"status": "Processing",
+			}
+		)
+		other.insert(ignore_permissions=True, ignore_links=True)
+		calls = []
+
+		def fake_get_existing(scope_key, *, for_update=False):
+			calls.append(for_update)
+			return other
+
+		with (
+			patch(
+				"roti_ropi_pos.mobile_pos.idempotency._get_existing_request",
+				side_effect=fake_get_existing,
+			),
+			patch("roti_ropi_pos.mobile_pos.idempotency.time.sleep") as sleep_mock,
+		):
+			with self.assertRaises(MobilePOSAPIError) as error:
+				_resolve_committed_request(
+					_scope_key(KEY, "v1.sales.submit"), request_hash, "v1.sales.submit"
+				)
+		self.assertEqual(error.exception.code, "IDEMPOTENCY_KEY_REUSED")
+		self.assertEqual(len(calls), 1)
+		self.assertTrue(calls[0])
+		sleep_mock.assert_not_called()
+
+	def test_resolve_committed_request_missing_row_exhaustion_raises_invariant(self):
+		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})
+		calls = []
+
+		def fake_get_existing(scope_key, *, for_update=False):
+			calls.append(for_update)
+			return None
+
+		with (
+			patch(
+				"roti_ropi_pos.mobile_pos.idempotency._get_existing_request",
+				side_effect=fake_get_existing,
+			),
+			patch("roti_ropi_pos.mobile_pos.idempotency.time.sleep") as sleep_mock,
+		):
+			with self.assertRaises(MobilePOSAPIError) as error:
+				_resolve_committed_request(
+					_scope_key(KEY, "v1.sales.submit"), request_hash, "v1.sales.submit"
+				)
+		self.assertEqual(error.exception.code, "IDEMPOTENCY_INVARIANT")
+		self.assertEqual(error.exception.status, 500)
+		self.assertEqual(len(calls), CONFLICT_RESOLUTION_ATTEMPTS)
+		self.assertTrue(all(for_update is True for for_update in calls))
+		self.assertEqual(sleep_mock.call_count, CONFLICT_RESOLUTION_ATTEMPTS - 1)
 
 	def test_delete_expired_sets_hold_on_reference_mismatch(self):
 		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})

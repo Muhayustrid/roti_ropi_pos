@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
@@ -31,6 +32,8 @@ OPERATION_REFERENCE_DOCTYPES: dict[str, set[str]] = {
 
 RETENTION_DAYS = 90
 CLEANUP_BATCH_SIZE = 100
+CONFLICT_RESOLUTION_ATTEMPTS = 5
+CONFLICT_RESOLUTION_DELAY_SECONDS = 0.05
 
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -81,11 +84,11 @@ def require_idempotency_key() -> str:
 	return key
 
 
-def _get_existing_request(scope_key: str):
-	name = frappe.db.get_value(DOCTYPE, {"scope_key": scope_key})
+def _get_existing_request(scope_key: str, *, for_update: bool = False):
+	name = frappe.db.get_value(DOCTYPE, {"scope_key": scope_key}, for_update=for_update)
 	if not name:
 		return None
-	return frappe.get_doc(DOCTYPE, name)
+	return frappe.get_doc(DOCTYPE, name, for_update=for_update)
 
 
 def _create_processing_request(scope_key: str, key: str, operation_id: str, request_hash: str):
@@ -121,6 +124,39 @@ def _request_in_progress(operation_id: str) -> MobilePOSAPIError:
 		status=409,
 		retryable=True,
 		details={"endpoint": operation_id, "retry_after_seconds": 1},
+	)
+
+
+def _resolve_committed_request(scope_key: str, request_hash: str, operation_id: str) -> dict:
+	"""Resolve the row a concurrent insert lost to, via bounded locking reads.
+
+	Called after a duplicate-key insert failure: another request already
+	committed (or is committing) the row this request lost the race for. Each
+	attempt takes a locking read (``for_update=True``) of the latest committed
+	state so it never observes a stale snapshot. A hash mismatch is a
+	permanent conflict and raises immediately. A still-``Processing`` row or a
+	momentarily missing row (the winner's insert has not committed yet) is
+	retried up to ``CONFLICT_RESOLUTION_ATTEMPTS`` times with a short delay.
+	"""
+	last_status: str | None = None
+	for attempt in range(CONFLICT_RESOLUTION_ATTEMPTS):
+		existing = _get_existing_request(scope_key, for_update=True)
+		if existing:
+			_raise_if_hash_conflict(existing, request_hash, operation_id)
+			if existing.status == "Completed":
+				return replay_response(existing)
+			last_status = existing.status
+		else:
+			last_status = None
+		if attempt < CONFLICT_RESOLUTION_ATTEMPTS - 1:
+			time.sleep(CONFLICT_RESOLUTION_DELAY_SECONDS)
+	if last_status == "Processing":
+		raise _request_in_progress(operation_id)
+	raise MobilePOSAPIError(
+		"IDEMPOTENCY_INVARIANT",
+		"A concurrent idempotency request could not be resolved.",
+		status=500,
+		details={"endpoint": operation_id},
 	)
 
 
@@ -213,18 +249,7 @@ def execute_idempotent(
 		request = _create_processing_request(scope_key, key, operation_id, request_hash)
 	except (frappe.UniqueValidationError, frappe.DuplicateEntryError):
 		frappe.db.rollback(save_point=savepoint)
-		existing = _get_existing_request(scope_key)
-		if not existing:
-			raise MobilePOSAPIError(
-				"IDEMPOTENCY_INVARIANT",
-				"A concurrent idempotency request disappeared before resolution.",
-				status=500,
-				details={"endpoint": operation_id},
-			)
-		_raise_if_hash_conflict(existing, request_hash, operation_id)
-		if existing.status == "Completed":
-			return replay_response(existing)
-		raise _request_in_progress(operation_id)
+		return _resolve_committed_request(scope_key, request_hash, operation_id)
 
 	try:
 		result = operation(key)
