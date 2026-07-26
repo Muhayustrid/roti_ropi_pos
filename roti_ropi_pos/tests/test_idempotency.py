@@ -32,34 +32,52 @@ def _result(name="INV-1"):
 	return MutationResult(data={"name": name}, reference_doctype="POS Invoice", reference_name=name)
 
 
-def _run_open_attempt(site, user, profile_name, key, barrier):
-	from roti_ropi_pos.mobile_pos.sessions import open_session
+def _open_entry(profile_name, transaction_id):
+	frappe.db.get_value("POS Profile", profile_name, "name", for_update=True)
+	frappe.db.get_value("User", frappe.session.user, "name", for_update=True)
+	profile = frappe.get_doc("POS Profile", profile_name)
+	opening = frappe.get_doc(
+		{
+			"doctype": "POS Opening Entry",
+			"period_start_date": frappe.utils.now_datetime(),
+			"posting_date": frappe.utils.today(),
+			"user": frappe.session.user,
+			"pos_profile": profile.name,
+			"company": profile.company,
+			"balance_details": [{"mode_of_payment": "Cash", "opening_amount": 0}],
+			"custom_mobile_pos_transaction_id": transaction_id,
+		}
+	)
+	opening.insert()
+	opening.submit()
+	return MutationResult(
+		data={"opening_session": {"name": opening.name}},
+		reference_doctype="POS Opening Entry",
+		reference_name=opening.name,
+	)
 
+
+def _run_open_attempt(site, user, profile_name, key, barrier):
 	frappe.init(site=site)
 	frappe.connect()
 	try:
 		frappe.set_user(user)
-		profile = frappe.get_doc("POS Profile", profile_name)
+		frappe.local.request = frappe._dict(headers={"X-Idempotency-Key": key})
 		barrier.wait(timeout=10)
-		with patch("frappe.get_request_header", return_value=key):
-			try:
-				response = execute_idempotent(
-					"v1.sessions.open",
-					{
-						"pos_profile": profile_name,
-						"opening_balances": [{"mode_of_payment": "Cash", "opening_amount": Decimal("0")}],
-					},
-					lambda transaction_id: open_session(
-						profile,
-						[{"mode_of_payment": "Cash", "opening_amount": Decimal("0")}],
-						transaction_id,
-					),
-				)
-			except MobilePOSAPIError as error:
-				if error.code != "REQUEST_IN_PROGRESS" or not error.retryable:
-					raise
-				frappe.db.rollback()
-				return {"error_code": error.code, "retryable": error.retryable}
+		try:
+			response = execute_idempotent(
+				"v1.sessions.open",
+				{
+					"pos_profile": profile_name,
+					"opening_balances": [{"mode_of_payment": "Cash", "opening_amount": Decimal("0")}],
+				},
+				lambda transaction_id: _open_entry(profile_name, transaction_id),
+			)
+		except MobilePOSAPIError as error:
+			if error.code != "REQUEST_IN_PROGRESS" or not error.retryable:
+				raise
+			frappe.db.rollback()
+			return {"error_code": error.code, "retryable": error.retryable}
 		frappe.db.commit()
 		return response
 	except Exception:
@@ -224,11 +242,21 @@ class TestIdempotency(IntegrationTestCase):
 		self.assertEqual(sum(1 for r in responses if r["meta"]["replayed"]), 19)
 
 	def test_twenty_concurrent_attempts_create_one_opening_and_one_request(self):
-		from roti_ropi_pos.tests.helpers import make_cashier
-		from roti_ropi_pos.tests.test_sessions import make_valid_profile
+		from erpnext.accounts.doctype.pos_profile.test_pos_profile import make_pos_profile
+		from frappe.core.doctype.user_permission.test_user_permission import create_user
 
-		user = make_cashier(f"idem-concurrent-{frappe.generate_hash(length=8)}@rotiropi.test")
-		profile = make_valid_profile(f"Idem Concurrent {frappe.generate_hash(length=8)}", user)
+		user = create_user(
+			f"idem-concurrent-{frappe.generate_hash(length=8)}@rotiropi.test",
+			"Accounts Manager",
+			"Accounts User",
+			"Sales Manager",
+			"Stock User",
+			"Item Manager",
+		).name
+		frappe.set_user(user)
+		profile = make_pos_profile(name=f"Idem Concurrent {frappe.generate_hash(length=8)}")
+		profile.append("applicable_for_users", {"user": user, "default": 1})
+		profile.save()
 		key = str(uuid4())
 		site = frappe.local.site
 		frappe.db.commit()
@@ -267,20 +295,22 @@ class TestIdempotency(IntegrationTestCase):
 		self.assertTrue(all(row["data"]["opening_session"]["name"] == opening_name for row in responses))
 
 		frappe.set_user(user)
+		request = getattr(frappe.local, "request", None)
 		try:
+			frappe.local.request = frappe._dict(headers={"X-Idempotency-Key": key})
 			for _ in in_progress:
-				with patch("frappe.get_request_header", return_value=key):
-					retry = execute_idempotent(
-						"v1.sessions.open",
-						{
-							"pos_profile": profile.name,
-							"opening_balances": [{"mode_of_payment": "Cash", "opening_amount": Decimal("0")}],
-						},
-						lambda transaction_id: self.fail("retry must replay, not execute"),
-					)
+				retry = execute_idempotent(
+					"v1.sessions.open",
+					{
+						"pos_profile": profile.name,
+						"opening_balances": [{"mode_of_payment": "Cash", "opening_amount": Decimal("0")}],
+					},
+					lambda transaction_id: self.fail("retry must replay, not execute"),
+				)
 				self.assertTrue(retry["meta"]["replayed"])
 				self.assertEqual(retry["data"]["opening_session"]["name"], opening_name)
 		finally:
+			frappe.local.request = request
 			frappe.set_user("Administrator")
 
 	def test_processing_request_blocks_concurrent_same_key(self):

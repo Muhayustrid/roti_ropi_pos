@@ -291,8 +291,9 @@ def delete_expired_requests(batch_size: int = CLEANUP_BATCH_SIZE) -> int:
 	"""Delete cleanup-eligible terminal Mobile POS Request rows.
 
 	Deletes only records whose status is Completed/Rejected, ``expires_at`` has
-	passed, no retention hold is set, and (when a business reference exists) the
-	referenced ERPNext document still stores the matching
+	passed, no retention hold is set, and both ``lease_expires_at`` and ``phase``
+	are blank. When a business reference exists, the referenced ERPNext document
+	must still store the matching
 	``custom_mobile_pos_transaction_id``. A mismatch sets a retention hold and
 	logs an operational error instead of deleting. ERPNext business documents are
 	never deleted or mutated.
