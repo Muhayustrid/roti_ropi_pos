@@ -140,7 +140,10 @@ def _resolve_committed_request(scope_key: str, request_hash: str, operation_id: 
 	"""
 	last_status: str | None = None
 	for attempt in range(CONFLICT_RESOLUTION_ATTEMPTS):
-		existing = _get_existing_request(scope_key, for_update=True)
+		try:
+			existing = _get_existing_request(scope_key, for_update=True)
+		except frappe.QueryDeadlockError:
+			existing = None
 		if existing:
 			_raise_if_hash_conflict(existing, request_hash, operation_id)
 			if existing.status == "Completed":

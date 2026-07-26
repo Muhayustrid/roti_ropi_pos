@@ -1,5 +1,8 @@
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
+from threading import Barrier
 from unittest.mock import patch
+from uuid import uuid4
 
 import frappe
 from frappe.tests import IntegrationTestCase
@@ -27,6 +30,45 @@ KEY_DEL4 = "6ba7b810-9dad-41d1-80b4-00c04fd430cc"
 
 def _result(name="INV-1"):
 	return MutationResult(data={"name": name}, reference_doctype="POS Invoice", reference_name=name)
+
+
+def _run_open_attempt(site, user, profile_name, key, barrier):
+	from roti_ropi_pos.mobile_pos.sessions import open_session
+
+	frappe.init(site=site)
+	frappe.connect()
+	try:
+		frappe.set_user(user)
+		profile = frappe.get_doc("POS Profile", profile_name)
+		barrier.wait(timeout=10)
+		with patch("frappe.get_request_header", return_value=key):
+			try:
+				response = execute_idempotent(
+					"v1.sessions.open",
+					{
+						"pos_profile": profile_name,
+						"opening_balances": [
+							{"mode_of_payment": "Cash", "opening_amount": Decimal("0")}
+						],
+					},
+					lambda transaction_id: open_session(
+						profile,
+						[{"mode_of_payment": "Cash", "opening_amount": Decimal("0")}],
+						transaction_id,
+					),
+				)
+			except MobilePOSAPIError as error:
+				if error.code != "REQUEST_IN_PROGRESS":
+					raise
+				frappe.db.rollback()
+				return {"error_code": error.code}
+		frappe.db.commit()
+		return response
+	except Exception:
+		frappe.db.rollback()
+		raise
+	finally:
+		frappe.destroy()
 
 
 class TestIdempotency(IntegrationTestCase):
@@ -183,6 +225,70 @@ class TestIdempotency(IntegrationTestCase):
 		self.assertTrue(all(r["data"] == {"name": "INV-1"} for r in responses))
 		self.assertEqual(sum(1 for r in responses if r["meta"]["replayed"]), 19)
 
+	def test_twenty_concurrent_attempts_create_one_opening_and_one_request(self):
+		from roti_ropi_pos.tests.helpers import make_cashier
+		from roti_ropi_pos.tests.test_sessions import make_valid_profile
+
+		user = make_cashier(f"idem-concurrent-{frappe.generate_hash(length=8)}@rotiropi.test")
+		profile = make_valid_profile(f"Idem Concurrent {frappe.generate_hash(length=8)}", user)
+		key = str(uuid4())
+		site = frappe.local.site
+		frappe.db.commit()
+		barrier = Barrier(20)
+
+		with ThreadPoolExecutor(max_workers=20) as executor:
+			futures = [
+				executor.submit(_run_open_attempt, site, user, profile.name, key, barrier)
+				for _ in range(20)
+			]
+			results = [future.result(timeout=30) for future in futures]
+
+		responses = [row for row in results if "meta" in row]
+		in_progress = [row for row in results if row.get("error_code") == "REQUEST_IN_PROGRESS"]
+		first = [row for row in responses if not row["meta"]["replayed"]]
+		replays = [row for row in responses if row["meta"]["replayed"]]
+		self.assertEqual(len(first), 1)
+		self.assertGreaterEqual(len(replays), 1)
+		self.assertEqual(len(responses) + len(in_progress), 20)
+		self.assertEqual(
+			frappe.db.count(
+				"POS Opening Entry",
+				{"custom_mobile_pos_transaction_id": key, "docstatus": 1},
+			),
+			1,
+		)
+		self.assertEqual(frappe.db.count("Mobile POS Request", {"idempotency_key": key}), 1)
+		self.assertEqual(
+			frappe.db.count(
+				"Mobile POS Request",
+				{"idempotency_key": key, "status": "Completed"},
+			),
+			1,
+		)
+		opening_name = first[0]["data"]["opening_session"]["name"]
+		self.assertTrue(
+			all(row["data"]["opening_session"]["name"] == opening_name for row in responses)
+		)
+
+		frappe.set_user(user)
+		try:
+			for _ in in_progress:
+				with patch("frappe.get_request_header", return_value=key):
+					retry = execute_idempotent(
+						"v1.sessions.open",
+						{
+							"pos_profile": profile.name,
+							"opening_balances": [
+								{"mode_of_payment": "Cash", "opening_amount": Decimal("0")}
+							],
+						},
+						lambda transaction_id: self.fail("retry must replay, not execute"),
+					)
+				self.assertTrue(retry["meta"]["replayed"])
+				self.assertEqual(retry["data"]["opening_session"]["name"], opening_name)
+		finally:
+			frappe.set_user("Administrator")
+
 	def test_processing_request_blocks_concurrent_same_key(self):
 		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})
 		scope_key = _scope_key(KEY, "v1.sales.submit")
@@ -302,6 +408,52 @@ class TestIdempotency(IntegrationTestCase):
 		self.assertTrue(calls)
 		self.assertTrue(all(for_update is True for for_update in calls))
 		self.assertGreaterEqual(sleep_mock.call_count, 1)
+
+	def test_resolve_committed_request_retries_deadlocked_locking_read(self):
+		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})
+		completed = frappe.get_doc(
+			{
+				"doctype": "Mobile POS Request",
+				"scope_key": _scope_key(KEY, "v1.sales.submit"),
+				"idempotency_key": KEY,
+				"endpoint": "v1.sales.submit",
+				"request_hash": request_hash,
+				"user": frappe.session.user,
+				"status": "Completed",
+				"reference_doctype": "POS Invoice",
+				"reference_name": "INV-1",
+				"http_status": 201,
+				"response_json": frappe.as_json(
+					{"ok": True, "data": {"name": "INV-1"}, "meta": {"api_version": "v1"}}
+				),
+				"resolved_at": "2026-01-01 00:00:00",
+				"expires_at": "2026-01-02 00:00:00",
+				"audit_reference_written": 1,
+			}
+		)
+		completed.insert(ignore_permissions=True, ignore_links=True)
+		calls = []
+
+		def fake_get_existing(scope_key, *, for_update=False):
+			calls.append(for_update)
+			if len(calls) == 1:
+				raise frappe.QueryDeadlockError("deadlock")
+			return completed
+
+		with (
+			patch(
+				"roti_ropi_pos.mobile_pos.idempotency._get_existing_request",
+				side_effect=fake_get_existing,
+			),
+			patch("roti_ropi_pos.mobile_pos.idempotency.time.sleep") as sleep_mock,
+		):
+			result = _resolve_committed_request(
+				_scope_key(KEY, "v1.sales.submit"), request_hash, "v1.sales.submit"
+			)
+		self.assertEqual(result["data"], {"name": "INV-1"})
+		self.assertTrue(result["meta"]["replayed"])
+		self.assertEqual(calls, [True, True])
+		sleep_mock.assert_called_once()
 
 	def test_resolve_committed_request_bounded_processing_raises_retryable(self):
 		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})
