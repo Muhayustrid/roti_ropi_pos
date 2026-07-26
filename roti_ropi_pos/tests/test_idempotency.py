@@ -47,9 +47,7 @@ def _run_open_attempt(site, user, profile_name, key, barrier):
 					"v1.sessions.open",
 					{
 						"pos_profile": profile_name,
-						"opening_balances": [
-							{"mode_of_payment": "Cash", "opening_amount": Decimal("0")}
-						],
+						"opening_balances": [{"mode_of_payment": "Cash", "opening_amount": Decimal("0")}],
 					},
 					lambda transaction_id: open_session(
 						profile,
@@ -238,8 +236,7 @@ class TestIdempotency(IntegrationTestCase):
 
 		with ThreadPoolExecutor(max_workers=20) as executor:
 			futures = [
-				executor.submit(_run_open_attempt, site, user, profile.name, key, barrier)
-				for _ in range(20)
+				executor.submit(_run_open_attempt, site, user, profile.name, key, barrier) for _ in range(20)
 			]
 			results = [future.result(timeout=30) for future in futures]
 
@@ -267,9 +264,7 @@ class TestIdempotency(IntegrationTestCase):
 			1,
 		)
 		opening_name = first[0]["data"]["opening_session"]["name"]
-		self.assertTrue(
-			all(row["data"]["opening_session"]["name"] == opening_name for row in responses)
-		)
+		self.assertTrue(all(row["data"]["opening_session"]["name"] == opening_name for row in responses))
 
 		frappe.set_user(user)
 		try:
@@ -279,9 +274,7 @@ class TestIdempotency(IntegrationTestCase):
 						"v1.sessions.open",
 						{
 							"pos_profile": profile.name,
-							"opening_balances": [
-								{"mode_of_payment": "Cash", "opening_amount": Decimal("0")}
-							],
+							"opening_balances": [{"mode_of_payment": "Cash", "opening_amount": Decimal("0")}],
 						},
 						lambda transaction_id: self.fail("retry must replay, not execute"),
 					)
