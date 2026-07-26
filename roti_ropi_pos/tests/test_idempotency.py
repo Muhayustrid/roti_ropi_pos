@@ -57,6 +57,14 @@ def _open_entry(profile_name, transaction_id):
 	)
 
 
+def _restore_request(request):
+	if request is None:
+		if hasattr(frappe.local, "request"):
+			delattr(frappe.local, "request")
+	else:
+		frappe.local.request = request
+
+
 def _run_open_attempt(site, user, profile_name, key, barrier):
 	frappe.init(site=site)
 	frappe.connect()
@@ -242,7 +250,6 @@ class TestIdempotency(IntegrationTestCase):
 		self.assertEqual(sum(1 for r in responses if r["meta"]["replayed"]), 19)
 
 	def test_twenty_concurrent_attempts_create_one_opening_and_one_request(self):
-		from erpnext.accounts.doctype.pos_profile.test_pos_profile import make_pos_profile
 		from frappe.core.doctype.user_permission.test_user_permission import create_user
 
 		user = create_user(
@@ -254,9 +261,31 @@ class TestIdempotency(IntegrationTestCase):
 			"Item Manager",
 		).name
 		frappe.set_user(user)
-		profile = make_pos_profile(name=f"Idem Concurrent {frappe.generate_hash(length=8)}")
-		profile.append("applicable_for_users", {"user": user, "default": 1})
-		profile.save()
+		mode = frappe.get_doc("Mode of Payment", "Cash")
+		if not frappe.db.exists("Mode of Payment Account", {"parent": "Cash", "company": "_Test Company"}):
+			mode.append("accounts", {"company": "_Test Company", "default_account": "Sales - _TC"})
+			mode.save()
+		profile = frappe.get_doc(
+			{
+				"doctype": "POS Profile",
+				"name": f"Idem Concurrent {frappe.generate_hash(length=8)}",
+				"company": "_Test Company",
+				"cost_center": "_Test Cost Center - _TC",
+				"currency": "INR",
+				"customer_group": frappe.db.get_value("Customer Group", {"is_group": 0}, "name"),
+				"expense_account": "_Test Account Cost for Goods Sold - _TC",
+				"income_account": "Sales - _TC",
+				"naming_series": "_T-POS Profile-",
+				"selling_price_list": frappe.db.get_value("Price List", {"selling": 1, "enabled": 1}, "name"),
+				"territory": "_Test Territory",
+				"warehouse": "_Test Warehouse - _TC",
+				"write_off_account": "_Test Write Off - _TC",
+				"write_off_cost_center": "_Test Write Off Cost Center - _TC",
+				"location": "Block 1",
+				"payments": [{"mode_of_payment": "Cash", "default": 1}],
+				"applicable_for_users": [{"user": user, "default": 1}],
+			}
+		).insert()
 		key = str(uuid4())
 		site = frappe.local.site
 		frappe.db.commit()
@@ -310,7 +339,7 @@ class TestIdempotency(IntegrationTestCase):
 				self.assertTrue(retry["meta"]["replayed"])
 				self.assertEqual(retry["data"]["opening_session"]["name"], opening_name)
 		finally:
-			frappe.local.request = request
+			_restore_request(request)
 			frappe.set_user("Administrator")
 
 	def test_processing_request_blocks_concurrent_same_key(self):
