@@ -22,6 +22,7 @@ def make_cashier(email: str) -> str:
 	user.flags.ignore_validate = True
 	user.flags.ignore_links = True
 	user.insert(ignore_permissions=True)
+	frappe.cache.hdel("roles", email)
 	return email
 
 

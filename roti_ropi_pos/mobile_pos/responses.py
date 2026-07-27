@@ -86,6 +86,9 @@ def api_endpoint(func: Callable[..., dict]) -> Callable[..., dict]:
 			_log.info("Mobile POS request %s failed: %s", request_id, error.code)
 			frappe.response["http_status_code"] = error.status
 			return error_envelope(error, request_id, server_time)
+		except frappe.QueryDeadlockError:
+			frappe.db.rollback()
+			raise
 		except Exception:
 			frappe.db.rollback(save_point=savepoint)
 			request_id = frappe.generate_hash(length=26)

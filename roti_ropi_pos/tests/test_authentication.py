@@ -80,6 +80,7 @@ class TestAuthentication(IntegrationTestCase):
 				"/api/method/roti_ropi_pos.api.v1.catalog.search",
 				"/api/method/roti_ropi_pos.api.v1.catalog.scan",
 				"/api/method/roti_ropi_pos.api.v1.catalog.quote_item",
+				"/api/method/roti_ropi_pos.api.v1.sales.submit",
 			},
 		)
 
@@ -87,17 +88,62 @@ class TestAuthentication(IntegrationTestCase):
 		with open(frappe.get_app_path("roti_ropi_pos", "fixtures", "custom_docperm.json")) as fixture:
 			rows = json.load(fixture)
 		cashier_rows = [row for row in rows if row["role"] == "Mobile POS Cashier"]
-		self.assertEqual(len(cashier_rows), 6)
+		self.assertEqual(len(cashier_rows), 7)
 		self.assertTrue(any(row["role"] != "Mobile POS Cashier" for row in rows))
 		self.assertEqual(
 			{row["parent"] for row in cashier_rows},
 			{
+				"Account",
 				"POS Profile",
 				"POS Opening Entry",
 				"POS Invoice",
 				"POS Closing Entry",
 				"Customer",
 				"Item",
+			},
+		)
+		account = next(row for row in cashier_rows if row["parent"] == "Account")
+		self.assertTrue(account["select"])
+		self.assertFalse(account["read"])
+		with open(
+			frappe.get_app_path("erpnext", "accounts", "doctype", "account", "account.json")
+		) as account_definition:
+			standard_account_rows = json.load(account_definition)["permissions"]
+		self.assertEqual(
+			{
+				(row["role"], row.get("permlevel", 0), row.get("if_owner", 0)): {
+					permission: int(bool(row.get(permission)))
+					for permission in (
+						"read",
+						"write",
+						"create",
+						"delete",
+						"select",
+						"report",
+						"export",
+						"import",
+						"share",
+					)
+				}
+				for row in rows
+				if row["parent"] == "Account" and row["role"] != "Mobile POS Cashier"
+			},
+			{
+				(row["role"], row.get("permlevel", 0), row.get("if_owner", 0)): {
+					permission: int(bool(row.get(permission)))
+					for permission in (
+						"read",
+						"write",
+						"create",
+						"delete",
+						"select",
+						"report",
+						"export",
+						"import",
+						"share",
+					)
+				}
+				for row in standard_account_rows
 			},
 		)
 		for row in cashier_rows:

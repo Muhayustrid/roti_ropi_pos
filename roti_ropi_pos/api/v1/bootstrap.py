@@ -23,9 +23,9 @@ def mobile_pos_endpoint(func: Callable[..., dict]) -> Callable[..., dict]:
 
 	Before endpoint logic it verifies the enabled user, ``Mobile POS Cashier``,
 	and supported POS Invoice mode. Bearer/client boundary and route denial are
-	enforced by the registered ``auth_hook`` before this decorator runs. Errors
-	raised here are mapped by the Phase 1 ``api_endpoint`` savepoint/error
-	mapper that wraps endpoint adapters.
+	enforced by the registered ``auth_hook`` before this decorator runs. The
+	composed Phase 1 ``api_endpoint`` owns savepoint/error mapping for every v1
+	adapter.
 	"""
 
 	@functools.wraps(func)
@@ -54,11 +54,10 @@ def mobile_pos_endpoint(func: Callable[..., dict]) -> Callable[..., dict]:
 				status=403,
 			) from error
 
-	return wrapper
+	return api_endpoint(wrapper)
 
 
 @frappe.whitelist(methods=["GET"])
-@api_endpoint
 @mobile_pos_endpoint
 def get(pos_profile: str | None = None) -> dict:
 	"""Return the cashier's bootstrap: user, profiles, opening, capabilities."""

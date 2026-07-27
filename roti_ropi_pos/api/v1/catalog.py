@@ -9,12 +9,11 @@ from roti_ropi_pos.mobile_pos.authorization import get_authorized_profile
 from roti_ropi_pos.mobile_pos.catalog import quote_item as quote_item_service
 from roti_ropi_pos.mobile_pos.catalog import scan_value, search_items
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
-from roti_ropi_pos.mobile_pos.responses import api_endpoint, success
+from roti_ropi_pos.mobile_pos.responses import success
 from roti_ropi_pos.mobile_pos.validation import decimal_string, require_json_object
 
 
 @frappe.whitelist(methods=["GET"])
-@api_endpoint
 @mobile_pos_endpoint
 def search(pos_profile=None, q="", item_group=None, start=0, limit=20) -> dict:
 	"""Return scoped catalog snapshots."""
@@ -37,7 +36,6 @@ def search(pos_profile=None, q="", item_group=None, start=0, limit=20) -> dict:
 
 
 @frappe.whitelist(methods=["POST"])
-@api_endpoint
 @mobile_pos_endpoint
 def scan(**kwargs) -> dict:
 	"""Resolve barcode through current scanner override."""
@@ -47,7 +45,6 @@ def scan(**kwargs) -> dict:
 
 
 @frappe.whitelist(methods=["POST"])
-@api_endpoint
 @mobile_pos_endpoint
 def quote_item(**kwargs) -> dict:
 	"""Return ERPNext-calculated item quote snapshot."""

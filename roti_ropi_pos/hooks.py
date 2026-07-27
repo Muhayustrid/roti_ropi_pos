@@ -166,6 +166,10 @@ scheduler_events = {
 # 	"Task": "roti_ropi_pos.custom.task.CustomTaskMixin"
 # }
 
+override_doctype_class = {
+	"POS Invoice": "roti_ropi_pos.overrides.pos_invoice.MobilePOSInvoice",
+}
+
 # Overriding Methods
 # ------------------------------
 #
@@ -194,6 +198,7 @@ fixtures = [
 				"parent",
 				"in",
 				[
+					"Account",
 					"POS Profile",
 					"POS Opening Entry",
 					"POS Invoice",

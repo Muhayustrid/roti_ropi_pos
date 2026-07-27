@@ -15,6 +15,7 @@ MOBILE_POS_PATHS = {
 	"/api/method/roti_ropi_pos.api.v1.catalog.search",
 	"/api/method/roti_ropi_pos.api.v1.catalog.scan",
 	"/api/method/roti_ropi_pos.api.v1.catalog.quote_item",
+	"/api/method/roti_ropi_pos.api.v1.sales.submit",
 }
 
 MOBILE_POS_BROWSER_PATHS = {

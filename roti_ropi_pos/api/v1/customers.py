@@ -6,11 +6,10 @@ from roti_ropi_pos.api.v1.bootstrap import mobile_pos_endpoint
 from roti_ropi_pos.mobile_pos.authorization import get_authorized_profile
 from roti_ropi_pos.mobile_pos.customers import search_customers
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
-from roti_ropi_pos.mobile_pos.responses import api_endpoint, success
+from roti_ropi_pos.mobile_pos.responses import success
 
 
 @frappe.whitelist(methods=["GET"])
-@api_endpoint
 @mobile_pos_endpoint
 def search(pos_profile=None, q="", start=0, limit=20) -> dict:
 	if not isinstance(pos_profile, str) or not pos_profile.strip():

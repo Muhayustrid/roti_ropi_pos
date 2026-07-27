@@ -271,6 +271,9 @@ def execute_idempotent(
 		)
 		frappe.db.release_savepoint(savepoint)
 		return response
+	except frappe.QueryDeadlockError:
+		frappe.db.rollback()
+		raise
 	except Exception:
 		frappe.db.rollback(save_point=savepoint)
 		raise

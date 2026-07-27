@@ -48,6 +48,7 @@ Read this file before changing this repository. These rules apply to the entire 
 
 | DocType | Allowed permissions |
 | --- | --- |
+| Account | select |
 | POS Profile | read |
 | POS Opening Entry | read, create, write, submit |
 | POS Invoice | read, create, write, submit |

@@ -6,13 +6,12 @@ from roti_ropi_pos.api.v1.bootstrap import mobile_pos_endpoint
 from roti_ropi_pos.mobile_pos.authorization import get_authorized_profile
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.mobile_pos.idempotency import execute_idempotent
-from roti_ropi_pos.mobile_pos.responses import api_endpoint, success
+from roti_ropi_pos.mobile_pos.responses import success
 from roti_ropi_pos.mobile_pos.sessions import get_current_opening, open_session, opening_dto
 from roti_ropi_pos.mobile_pos.validation import decimal_string, require_json_object
 
 
 @frappe.whitelist(methods=["GET"])
-@api_endpoint
 @mobile_pos_endpoint
 def current(pos_profile: str | None = None) -> dict:
 	"""Return the selected profile's shared current-opening projection or null."""
@@ -24,7 +23,6 @@ def current(pos_profile: str | None = None) -> dict:
 
 
 @frappe.whitelist(methods=["POST"])
-@api_endpoint
 @mobile_pos_endpoint
 def open(**kwargs) -> dict:
 	"""Open one POS session through the durable idempotency executor."""
