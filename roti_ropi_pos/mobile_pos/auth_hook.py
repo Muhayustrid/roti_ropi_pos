@@ -12,6 +12,9 @@ MOBILE_POS_PATHS = {
 	"/api/method/roti_ropi_pos.api.v1.sessions.current",
 	"/api/method/roti_ropi_pos.api.v1.sessions.open",
 	"/api/method/roti_ropi_pos.api.v1.customers.search",
+	"/api/method/roti_ropi_pos.api.v1.catalog.search",
+	"/api/method/roti_ropi_pos.api.v1.catalog.scan",
+	"/api/method/roti_ropi_pos.api.v1.catalog.quote_item",
 }
 
 MOBILE_POS_BROWSER_PATHS = {
