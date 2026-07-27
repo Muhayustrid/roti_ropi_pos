@@ -18,6 +18,8 @@ MISSING_UOM_CONVERSION = {
 	"code": "MISSING_UOM_CONVERSION",
 	"message": "The selected UOM has no conversion factor.",
 }
+# ponytail: bounded security post-filtering; use a permission-aware core query when available.
+MAX_CATALOG_CORE_PAGES = 10
 
 
 def search_items(profile, q: str = "", item_group: str | None = None, start: int = 0, limit: int = 20) -> dict:
@@ -32,7 +34,10 @@ def search_items(profile, q: str = "", item_group: str | None = None, start: int
 	raw_start = 0
 	rows = []
 	target = start + limit + 1
-	while len(rows) < target:
+	core_may_have_more = False
+	for _ in range(MAX_CATALOG_CORE_PAGES):
+		if len(rows) >= target:
+			break
 		result = get_items(
 			start=raw_start,
 			page_length=page_length,
@@ -50,10 +55,16 @@ def search_items(profile, q: str = "", item_group: str | None = None, start: int
 		if len(page) < page_length:
 			break
 		raw_start += len(page)
+	else:
+		core_may_have_more = True
 	page_rows = rows[start : start + limit + 1]
 	return {
 		"items": [_catalog_dto(row, profile) for row in page_rows[:limit]],
-		"page": {"start": start, "limit": limit, "has_more": len(page_rows) > limit},
+		"page": {
+			"start": start,
+			"limit": limit,
+			"has_more": len(page_rows) > limit or core_may_have_more,
+		},
 	}
 
 

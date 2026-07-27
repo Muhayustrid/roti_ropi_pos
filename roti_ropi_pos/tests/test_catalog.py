@@ -147,6 +147,28 @@ class TestCatalogContracts(IntegrationTestCase):
 
 		self.assertEqual([item["item_code"] for item in result["items"]], ["SECOND"])
 
+	def test_search_bounds_filtered_core_page_scans(self):
+		from roti_ropi_pos.mobile_pos.catalog import MAX_CATALOG_CORE_PAGES, search_items
+
+		profile = SimpleNamespace(
+			name="POS-TEST",
+			company="Test Company",
+			warehouse="Test Warehouse",
+			selling_price_list="PG-TEST",
+			currency="IDR",
+		)
+		row = {"item_code": "HIDDEN", "item_group": "Forbidden"}
+		with (
+			patch("roti_ropi_pos.mobile_pos.catalog.require_doc_permission"),
+			patch("roti_ropi_pos.mobile_pos.catalog._allowed_item_groups", return_value={"Allowed"}),
+			patch("roti_ropi_pos.mobile_pos.catalog._visible_item_codes", return_value=set()),
+			patch("roti_ropi_pos.mobile_pos.catalog.get_items", return_value={"items": [row, row]}) as get_items,
+		):
+			result = search_items(profile, limit=1)
+
+		self.assertEqual(get_items.call_count, MAX_CATALOG_CORE_PAGES)
+		self.assertTrue(result["page"]["has_more"])
+
 	def test_search_rejects_unknown_or_unauthorized_group_without_disclosure(self):
 		from roti_ropi_pos.mobile_pos.catalog import search_items
 
