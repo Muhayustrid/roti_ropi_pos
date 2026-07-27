@@ -19,7 +19,9 @@ MISSING_UOM_CONVERSION = {
 	"message": "The selected UOM has no conversion factor.",
 }
 # ponytail: bounded security post-filtering; use a permission-aware core query when available.
-MAX_CATALOG_CORE_PAGES = 10
+MAX_CATALOG_START = 1000
+MAX_CATALOG_CORE_PAGES = 11
+CATALOG_FOLLOWUP_PAGE_LENGTH = 100
 
 
 def search_items(
@@ -28,18 +30,25 @@ def search_items(
 	"""Return permission-filtered POS Item display snapshots."""
 	require_doc_permission("Item", "read")
 	limit = min(limit, 100)
+	if start > MAX_CATALOG_START:
+		raise MobilePOSAPIError(
+			"INVALID_REQUEST",
+			"start is invalid.",
+			details={"field": "start", "reason": f"Must be <= {MAX_CATALOG_START}."},
+		)
 	groups = _allowed_item_groups(profile)
 	if item_group and item_group not in groups:
 		raise _not_found("item_group", item_group)
 	visible = _visible_item_codes()
-	page_length = limit + 1
+	first_page_length = limit + 1
 	raw_start = 0
 	rows = []
 	target = start + limit + 1
 	core_may_have_more = False
-	for _ in range(MAX_CATALOG_CORE_PAGES):
+	for page_number in range(MAX_CATALOG_CORE_PAGES):
 		if len(rows) >= target:
 			break
+		page_length = first_page_length if page_number == 0 else CATALOG_FOLLOWUP_PAGE_LENGTH
 		result = get_items(
 			start=raw_start,
 			page_length=page_length,
@@ -124,7 +133,7 @@ def quote_item(
 	_require_allowed_item(item, profile)
 	resolved = resolve_customer(profile, customer)
 	if batch_no:
-		_validate_batch(batch_no, item, profile)
+		_validate_batch_identity(batch_no, item, profile)
 	ctx = frappe._dict(
 		{
 			"doctype": "POS Invoice",
@@ -149,11 +158,13 @@ def quote_item(
 		}
 	)
 	details = get_item_details(ctx, doc={"doctype": "POS Invoice", **ctx})
-	factor = _item_conversion_factor(item_code, uom)
+	factor = details.get("conversion_factor")
 	warnings = []
 	if uom != item.stock_uom and not factor:
 		warnings.append(MISSING_UOM_CONVERSION)
-	factor = factor or details.get("conversion_factor") or 1
+	factor = factor or 1
+	if batch_no:
+		_validate_batch_quantity(batch_no, item, profile, qty, Decimal(str(factor)))
 	available_qty, _, _ = get_stock_availability(item_code, profile.warehouse)
 	price_list_rate = details.get("price_list_rate") or 0
 	discount_percentage = details.get("discount_percentage") or 0
@@ -213,7 +224,7 @@ def _item_conversion_factor(item_code: str, uom: str) -> Decimal | None:
 	return Decimal(str(factor)) if factor and Decimal(str(factor)) > 0 else None
 
 
-def _validate_batch(batch_no: str, item, profile) -> None:
+def _validate_batch_identity(batch_no: str, item, profile) -> None:
 	try:
 		batch = frappe.get_doc("Batch", batch_no)
 	except frappe.DoesNotExistError as error:
@@ -224,8 +235,16 @@ def _validate_batch(batch_no: str, item, profile) -> None:
 		raise _invalid_batch(item.name, batch_no, "not_found")
 	if batch.expiry_date and frappe.utils.getdate(batch.expiry_date) < frappe.utils.getdate():
 		raise _invalid_batch(item.name, batch_no, "expired")
-	if not get_batch_qty(batch_no=batch_no, warehouse=profile.warehouse, item_code=item.name):
+
+
+def _validate_batch_quantity(batch_no: str, item, profile, qty: Decimal, factor: Decimal) -> None:
+	available_qty = Decimal(
+		str(get_batch_qty(batch_no=batch_no, warehouse=profile.warehouse, item_code=item.name) or 0)
+	)
+	if not available_qty:
 		raise _invalid_batch(item.name, batch_no, "wrong_warehouse")
+	if available_qty < qty * factor:
+		raise _invalid_batch(item.name, batch_no, "insufficient")
 
 
 def _catalog_dto(row, profile) -> dict:

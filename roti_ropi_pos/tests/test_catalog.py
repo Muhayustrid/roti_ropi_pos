@@ -147,6 +147,43 @@ class TestCatalogContracts(IntegrationTestCase):
 
 		self.assertEqual([item["item_code"] for item in result["items"]], ["SECOND"])
 
+	def test_search_finds_later_logical_offset_with_followup_page(self):
+		from roti_ropi_pos.mobile_pos.catalog import search_items
+
+		profile = SimpleNamespace(
+			name="POS-TEST",
+			company="Test Company",
+			warehouse="Test Warehouse",
+			selling_price_list="PG-TEST",
+			currency="IDR",
+		)
+		first_page = [{"item_code": f"FIRST-{index}", "item_group": "Allowed"} for index in range(2)]
+		second_page = [
+			{
+				"item_code": f"ITEM-{index}",
+				"item_group": "Allowed",
+				"item_name": f"Item {index}",
+				"uom": "Nos",
+				"price_list_rate": 1,
+				"actual_qty": 1,
+			}
+			for index in range(100)
+		]
+		visible = {row["item_code"] for row in first_page + second_page}
+		with (
+			patch("roti_ropi_pos.mobile_pos.catalog.require_doc_permission"),
+			patch("roti_ropi_pos.mobile_pos.catalog._allowed_item_groups", return_value={"Allowed"}),
+			patch("roti_ropi_pos.mobile_pos.catalog._visible_item_codes", return_value=visible),
+			patch(
+				"roti_ropi_pos.mobile_pos.catalog.get_items",
+				side_effect=[{"items": first_page}, {"items": second_page}],
+			) as get_items,
+		):
+			result = search_items(profile, start=20, limit=1)
+
+		self.assertEqual(result["items"][0]["item_code"], "ITEM-18")
+		self.assertEqual(get_items.call_args_list[1].kwargs["page_length"], 100)
+
 	def test_search_bounds_filtered_core_page_scans(self):
 		from roti_ropi_pos.mobile_pos.catalog import MAX_CATALOG_CORE_PAGES, search_items
 
@@ -158,13 +195,15 @@ class TestCatalogContracts(IntegrationTestCase):
 			currency="IDR",
 		)
 		row = {"item_code": "HIDDEN", "item_group": "Forbidden"}
+
+		def full_page(*, page_length, **kwargs):
+			return {"items": [row] * page_length}
+
 		with (
 			patch("roti_ropi_pos.mobile_pos.catalog.require_doc_permission"),
 			patch("roti_ropi_pos.mobile_pos.catalog._allowed_item_groups", return_value={"Allowed"}),
 			patch("roti_ropi_pos.mobile_pos.catalog._visible_item_codes", return_value=set()),
-			patch(
-				"roti_ropi_pos.mobile_pos.catalog.get_items", return_value={"items": [row, row]}
-			) as get_items,
+			patch("roti_ropi_pos.mobile_pos.catalog.get_items", side_effect=full_page) as get_items,
 		):
 			result = search_items(profile, limit=1)
 
@@ -232,6 +271,92 @@ class TestCatalogContracts(IntegrationTestCase):
 		self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[catalog_api.search], ["GET"])
 		self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[catalog_api.scan], ["POST"])
 		self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[catalog_api.quote_item], ["POST"])
+
+	def test_quote_uses_effective_erpnext_uom_factor_without_warning(self):
+		from roti_ropi_pos.mobile_pos.catalog import quote_item
+
+		profile = SimpleNamespace(
+			name="POS-TEST",
+			company="Test Company",
+			warehouse="Test Warehouse",
+			selling_price_list="PG-TEST",
+			currency="IDR",
+		)
+		item = SimpleNamespace(
+			name="ITEM-001",
+			item_group="Allowed",
+			disabled=0,
+			is_sales_item=1,
+			has_variants=0,
+			is_fixed_asset=0,
+			stock_uom="Nos",
+		)
+		details = frappe._dict(
+			item_code="ITEM-001",
+			uom="Box",
+			conversion_factor=6,
+			price_list_rate=10,
+			discount_percentage=0,
+			rate=10,
+		)
+		with (
+			patch("roti_ropi_pos.mobile_pos.catalog.require_doc_permission"),
+			patch("roti_ropi_pos.mobile_pos.catalog._allowed_item_groups", return_value={"Allowed"}),
+			patch("roti_ropi_pos.mobile_pos.catalog._get_visible_item", return_value=item),
+			patch(
+				"roti_ropi_pos.mobile_pos.catalog.resolve_customer",
+				return_value=SimpleNamespace(name="CUST-001"),
+			),
+			patch("roti_ropi_pos.mobile_pos.catalog.get_item_details", return_value=details),
+			patch("roti_ropi_pos.mobile_pos.catalog.get_stock_availability", return_value=(12, True, False)),
+			patch("roti_ropi_pos.mobile_pos.catalog.frappe.utils.today", return_value="2026-07-27"),
+		):
+			result = quote_item(profile, customer=None, item_code="ITEM-001", qty=Decimal("1"), uom="Box")
+
+		self.assertEqual(result["item"]["conversion_factor"], "6")
+		self.assertEqual(result["warnings"], [])
+
+	def test_quote_rejects_insufficient_batch_quantity(self):
+		from roti_ropi_pos.mobile_pos.catalog import quote_item
+
+		profile = SimpleNamespace(
+			name="POS-TEST",
+			company="Test Company",
+			warehouse="Test Warehouse",
+			selling_price_list="PG-TEST",
+			currency="IDR",
+		)
+		item = SimpleNamespace(
+			name="ITEM-001",
+			item_group="Allowed",
+			disabled=0,
+			is_sales_item=1,
+			has_variants=0,
+			is_fixed_asset=0,
+			stock_uom="Nos",
+		)
+		batch = SimpleNamespace(name="BATCH-001", item="ITEM-001", disabled=0, expiry_date=None)
+		with (
+			patch("roti_ropi_pos.mobile_pos.catalog.require_doc_permission"),
+			patch("roti_ropi_pos.mobile_pos.catalog._allowed_item_groups", return_value={"Allowed"}),
+			patch("roti_ropi_pos.mobile_pos.catalog._get_visible_item", return_value=item),
+			patch("roti_ropi_pos.mobile_pos.catalog.resolve_customer"),
+			patch("roti_ropi_pos.mobile_pos.catalog.frappe.get_doc", return_value=batch),
+			patch("roti_ropi_pos.mobile_pos.catalog.get_item_details", return_value={"conversion_factor": 1}),
+			patch("roti_ropi_pos.mobile_pos.catalog.frappe.utils.today", return_value="2026-07-27"),
+			patch("roti_ropi_pos.mobile_pos.catalog.get_batch_qty", return_value=Decimal("1")),
+		):
+			with self.assertRaises(MobilePOSAPIError) as raised:
+				quote_item(
+					profile,
+					customer=None,
+					item_code="ITEM-001",
+					qty=Decimal("2"),
+					uom="Nos",
+					batch_no="BATCH-001",
+				)
+		self.assertEqual(raised.exception.code, "INVALID_BATCH")
+		self.assertEqual(raised.exception.details["reason"], "insufficient")
 
 	def test_quote_validates_expired_batch_before_authoritative_quote(self):
 		from roti_ropi_pos.mobile_pos.catalog import quote_item
