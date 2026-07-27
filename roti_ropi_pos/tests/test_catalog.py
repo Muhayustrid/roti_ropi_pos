@@ -49,7 +49,7 @@ class TestCatalogContracts(IntegrationTestCase):
 			patch("roti_ropi_pos.mobile_pos.catalog.require_doc_permission"),
 			patch("roti_ropi_pos.mobile_pos.catalog._allowed_item_groups", return_value={"Allowed"}),
 			patch("roti_ropi_pos.mobile_pos.catalog._visible_item_codes", return_value={"ITEM-001"}),
-			patch("roti_ropi_pos.mobile_pos.catalog.get_items", return_value={"items": [row]} ) as get_items,
+			patch("roti_ropi_pos.mobile_pos.catalog.get_items", return_value={"items": [row]}) as get_items,
 		):
 			result = search_items(profile, limit=20)
 
@@ -162,7 +162,9 @@ class TestCatalogContracts(IntegrationTestCase):
 			patch("roti_ropi_pos.mobile_pos.catalog.require_doc_permission"),
 			patch("roti_ropi_pos.mobile_pos.catalog._allowed_item_groups", return_value={"Allowed"}),
 			patch("roti_ropi_pos.mobile_pos.catalog._visible_item_codes", return_value=set()),
-			patch("roti_ropi_pos.mobile_pos.catalog.get_items", return_value={"items": [row, row]}) as get_items,
+			patch(
+				"roti_ropi_pos.mobile_pos.catalog.get_items", return_value={"items": [row, row]}
+			) as get_items,
 		):
 			result = search_items(profile, limit=1)
 
@@ -195,7 +197,10 @@ class TestCatalogContracts(IntegrationTestCase):
 			is_fixed_asset=0,
 			stock_uom="Nos",
 		)
-		scanner = lambda value, context: {"item_code": "ITEM-001", "batch_no": "BATCH-001", "uom": "Box"}
+
+		def scanner(value, context):
+			return {"item_code": "ITEM-001", "batch_no": "BATCH-001", "uom": "Box"}
+
 		with (
 			patch("roti_ropi_pos.mobile_pos.catalog.require_doc_permission"),
 			patch("roti_ropi_pos.mobile_pos.catalog._allowed_item_groups", return_value={"Allowed"}),
@@ -248,7 +253,12 @@ class TestCatalogContracts(IntegrationTestCase):
 			stock_uom="Nos",
 			has_batch_no=1,
 		)
-		batch = SimpleNamespace(name="BATCH-001", item="ITEM-001", disabled=0, expiry_date=frappe.utils.add_days(frappe.utils.today(), -1))
+		batch = SimpleNamespace(
+			name="BATCH-001",
+			item="ITEM-001",
+			disabled=0,
+			expiry_date=frappe.utils.add_days(frappe.utils.today(), -1),
+		)
 		with (
 			patch("roti_ropi_pos.mobile_pos.catalog.require_doc_permission"),
 			patch("roti_ropi_pos.mobile_pos.catalog._allowed_item_groups", return_value={"Allowed"}),
@@ -257,6 +267,15 @@ class TestCatalogContracts(IntegrationTestCase):
 			patch("roti_ropi_pos.mobile_pos.catalog.frappe.get_doc", return_value=batch),
 		):
 			with self.assertRaises(MobilePOSAPIError) as raised:
-				quote_item(profile, customer=None, item_code="ITEM-001", qty=Decimal("1"), uom="Nos", batch_no="BATCH-001")
+				quote_item(
+					profile,
+					customer=None,
+					item_code="ITEM-001",
+					qty=Decimal("1"),
+					uom="Nos",
+					batch_no="BATCH-001",
+				)
 		self.assertEqual(raised.exception.code, "INVALID_BATCH")
-		self.assertEqual(raised.exception.details, {"item_code": "ITEM-001", "batch_no": "BATCH-001", "reason": "expired"})
+		self.assertEqual(
+			raised.exception.details, {"item_code": "ITEM-001", "batch_no": "BATCH-001", "reason": "expired"}
+		)

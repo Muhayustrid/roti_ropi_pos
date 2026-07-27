@@ -22,7 +22,9 @@ MISSING_UOM_CONVERSION = {
 MAX_CATALOG_CORE_PAGES = 10
 
 
-def search_items(profile, q: str = "", item_group: str | None = None, start: int = 0, limit: int = 20) -> dict:
+def search_items(
+	profile, q: str = "", item_group: str | None = None, start: int = 0, limit: int = 20
+) -> dict:
 	"""Return permission-filtered POS Item display snapshots."""
 	require_doc_permission("Item", "read")
 	limit = min(limit, 100)
@@ -113,7 +115,9 @@ def scan_value(profile, value: str) -> dict:
 	}
 
 
-def quote_item(profile, *, customer: str | None, item_code: str, qty: Decimal, uom: str, batch_no: str | None = None) -> dict:
+def quote_item(
+	profile, *, customer: str | None, item_code: str, qty: Decimal, uom: str, batch_no: str | None = None
+) -> dict:
 	"""Return ERPNext-calculated quote snapshot after explicit scope checks."""
 	require_doc_permission("Item", "read")
 	item = _get_visible_item(item_code)
