@@ -226,11 +226,23 @@ def _item_conversion_factor(item_code: str, uom: str) -> Decimal | None:
 def _has_effective_conversion(item_code: str, uom: str, stock_uom: str) -> bool:
 	if uom == stock_uom:
 		return True
-	if frappe.db.exists("UOM Conversion Detail", {"parent": item_code, "uom": uom}):
+	variant_of = frappe.get_cached_value("Item", item_code, "variant_of")
+	item_codes = [item_code, variant_of] if variant_of else [item_code]
+	if frappe.get_all(
+		"UOM Conversion Detail",
+		filters={"parent": ["in", item_codes], "uom": uom, "conversion_factor": [">", 0]},
+		limit=1,
+	):
 		return True
 	return bool(
-		frappe.db.exists("UOM Conversion Factor", {"from_uom": uom, "to_uom": stock_uom})
-		or frappe.db.exists("UOM Conversion Factor", {"from_uom": stock_uom, "to_uom": uom})
+		frappe.db.exists(
+			"UOM Conversion Factor",
+			{"from_uom": uom, "to_uom": stock_uom, "value": [">", 0]},
+		)
+		or frappe.db.exists(
+			"UOM Conversion Factor",
+			{"from_uom": stock_uom, "to_uom": uom, "value": [">", 0]},
+		)
 	)
 
 

@@ -272,6 +272,25 @@ class TestCatalogContracts(IntegrationTestCase):
 		self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[catalog_api.scan], ["POST"])
 		self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[catalog_api.quote_item], ["POST"])
 
+	def test_effective_conversion_rejects_zero_factor(self):
+		from roti_ropi_pos.mobile_pos.catalog import _has_effective_conversion
+
+		with (
+			patch("roti_ropi_pos.mobile_pos.catalog.frappe.get_cached_value", return_value=None),
+			patch("roti_ropi_pos.mobile_pos.catalog.frappe.get_all", return_value=[]),
+			patch("roti_ropi_pos.mobile_pos.catalog.frappe.db.exists", return_value=None),
+		):
+			self.assertFalse(_has_effective_conversion("ITEM-001", "Carton", "Nos"))
+
+	def test_effective_conversion_accepts_variant_template_factor(self):
+		from roti_ropi_pos.mobile_pos.catalog import _has_effective_conversion
+
+		with (
+			patch("roti_ropi_pos.mobile_pos.catalog.frappe.get_cached_value", return_value="ITEM-TEMPLATE"),
+			patch("roti_ropi_pos.mobile_pos.catalog.frappe.get_all", return_value=[{"conversion_factor": 6}]),
+		):
+			self.assertTrue(_has_effective_conversion("ITEM-VARIANT", "Box", "Nos"))
+
 	def test_quote_warns_when_erpnext_falls_back_to_one_for_missing_uom(self):
 		from roti_ropi_pos.mobile_pos.catalog import MISSING_UOM_CONVERSION, quote_item
 
