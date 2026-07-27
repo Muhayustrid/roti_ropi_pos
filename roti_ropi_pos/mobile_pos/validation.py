@@ -19,13 +19,20 @@ def decimal_string(value: Any, *, field: str) -> Decimal:
 			details={"field": field, "reason": "Expected a decimal string."},
 		)
 	try:
-		return Decimal(value)
+		parsed = Decimal(value)
 	except InvalidOperation as error:
 		raise MobilePOSAPIError(
 			"INVALID_REQUEST",
 			f"{field} must be a decimal string.",
 			details={"field": field, "reason": "Invalid decimal syntax."},
 		) from error
+	if not parsed.is_finite():
+		raise MobilePOSAPIError(
+			"INVALID_REQUEST",
+			f"{field} must be a decimal string.",
+			details={"field": field, "reason": "Decimal value must be finite."},
+		)
+	return parsed
 
 
 def reject_fields(payload: dict, blocked: set[str]) -> None:

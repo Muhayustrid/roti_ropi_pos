@@ -36,6 +36,11 @@ class TestAPIFoundation(IntegrationTestCase):
 		with self.assertRaisesRegex(MobilePOSAPIError, "decimal string"):
 			decimal_string("abc", field="amount")
 
+	def test_decimal_string_rejects_non_finite_values(self):
+		for value in ("NaN", "Infinity", "-Infinity"):
+			with self.subTest(value=value), self.assertRaisesRegex(MobilePOSAPIError, "decimal string"):
+				decimal_string(value, field="amount")
+
 	def test_reject_fields_blocks_server_owned_values(self):
 		with self.assertRaisesRegex(MobilePOSAPIError, "company"):
 			reject_fields({"company": "Roti Ropi"}, {"company", "owner"})
