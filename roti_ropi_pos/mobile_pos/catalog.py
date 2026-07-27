@@ -7,6 +7,7 @@ from erpnext.accounts.doctype.pos_invoice.pos_invoice import get_stock_availabil
 from erpnext.accounts.doctype.pos_profile.pos_profile import get_item_groups
 from erpnext.selling.page.point_of_sale.point_of_sale import get_items
 from erpnext.stock.doctype.batch.batch import get_batch_qty
+from erpnext.stock.doctype.item.item import get_uom_conv_factor
 from erpnext.stock.get_item_details import get_conversion_factor as get_item_conversion_factor
 from erpnext.stock.get_item_details import get_item_details
 
@@ -109,7 +110,8 @@ def scan_value(profile, value: str) -> dict:
 	if not factor:
 		factor = _item_conversion_factor(item_code, uom)
 	warnings = []
-	if uom != item.stock_uom and not factor:
+	if uom != item.stock_uom and not _has_effective_conversion(item_code, uom, item.stock_uom):
+		factor = None
 		warnings.append(MISSING_UOM_CONVERSION)
 	return {
 		"scan": {
@@ -234,16 +236,8 @@ def _has_effective_conversion(item_code: str, uom: str, stock_uom: str) -> bool:
 		limit=1,
 	):
 		return True
-	return bool(
-		frappe.db.exists(
-			"UOM Conversion Factor",
-			{"from_uom": uom, "to_uom": stock_uom, "value": [">", 0]},
-		)
-		or frappe.db.exists(
-			"UOM Conversion Factor",
-			{"from_uom": stock_uom, "to_uom": uom, "value": [">", 0]},
-		)
-	)
+	global_factor = get_uom_conv_factor(uom, stock_uom)
+	return bool(global_factor and Decimal(str(global_factor)) > 0)
 
 
 def _validate_batch_identity(batch_no: str, item, profile) -> None:

@@ -245,6 +245,7 @@ class TestCatalogContracts(IntegrationTestCase):
 			patch("roti_ropi_pos.mobile_pos.catalog._allowed_item_groups", return_value={"Allowed"}),
 			patch("roti_ropi_pos.mobile_pos.catalog._get_visible_item", return_value=item),
 			patch("roti_ropi_pos.mobile_pos.catalog._item_conversion_factor", return_value=None),
+			patch("roti_ropi_pos.mobile_pos.catalog._has_effective_conversion", return_value=False),
 			patch("frappe.override_whitelisted_method", return_value="test.scanner"),
 			patch("frappe.get_attr", return_value=scanner),
 		):
@@ -281,6 +282,16 @@ class TestCatalogContracts(IntegrationTestCase):
 			patch("roti_ropi_pos.mobile_pos.catalog.frappe.db.exists", return_value=None),
 		):
 			self.assertFalse(_has_effective_conversion("ITEM-001", "Carton", "Nos"))
+
+	def test_effective_conversion_accepts_intermediate_global_factor(self):
+		from roti_ropi_pos.mobile_pos.catalog import _has_effective_conversion
+
+		with (
+			patch("roti_ropi_pos.mobile_pos.catalog.frappe.get_cached_value", return_value=None),
+			patch("roti_ropi_pos.mobile_pos.catalog.frappe.get_all", return_value=[]),
+			patch("roti_ropi_pos.mobile_pos.catalog.get_uom_conv_factor", return_value=12),
+		):
+			self.assertTrue(_has_effective_conversion("ITEM-001", "Carton", "Nos"))
 
 	def test_effective_conversion_accepts_variant_template_factor(self):
 		from roti_ropi_pos.mobile_pos.catalog import _has_effective_conversion
