@@ -272,6 +272,50 @@ class TestCatalogContracts(IntegrationTestCase):
 		self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[catalog_api.scan], ["POST"])
 		self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[catalog_api.quote_item], ["POST"])
 
+	def test_quote_warns_when_erpnext_falls_back_to_one_for_missing_uom(self):
+		from roti_ropi_pos.mobile_pos.catalog import MISSING_UOM_CONVERSION, quote_item
+
+		profile = SimpleNamespace(
+			name="POS-TEST",
+			company="Test Company",
+			warehouse="Test Warehouse",
+			selling_price_list="PG-TEST",
+			currency="IDR",
+		)
+		item = SimpleNamespace(
+			name="ITEM-001",
+			item_group="Allowed",
+			disabled=0,
+			is_sales_item=1,
+			has_variants=0,
+			is_fixed_asset=0,
+			stock_uom="Nos",
+		)
+		details = frappe._dict(
+			item_code="ITEM-001",
+			uom="Carton",
+			conversion_factor=1,
+			price_list_rate=10,
+			discount_percentage=0,
+			rate=10,
+		)
+		with (
+			patch("roti_ropi_pos.mobile_pos.catalog.require_doc_permission"),
+			patch("roti_ropi_pos.mobile_pos.catalog._allowed_item_groups", return_value={"Allowed"}),
+			patch("roti_ropi_pos.mobile_pos.catalog._get_visible_item", return_value=item),
+			patch(
+				"roti_ropi_pos.mobile_pos.catalog.resolve_customer",
+				return_value=SimpleNamespace(name="CUST-001"),
+			),
+			patch("roti_ropi_pos.mobile_pos.catalog.get_item_details", return_value=details),
+			patch("roti_ropi_pos.mobile_pos.catalog._has_effective_conversion", return_value=False),
+			patch("roti_ropi_pos.mobile_pos.catalog.get_stock_availability", return_value=(12, True, False)),
+			patch("roti_ropi_pos.mobile_pos.catalog.frappe.utils.today", return_value="2026-07-27"),
+		):
+			result = quote_item(profile, customer=None, item_code="ITEM-001", qty=Decimal("1"), uom="Carton")
+
+		self.assertEqual(result["warnings"], [MISSING_UOM_CONVERSION])
+
 	def test_quote_uses_effective_erpnext_uom_factor_without_warning(self):
 		from roti_ropi_pos.mobile_pos.catalog import quote_item
 
@@ -308,6 +352,7 @@ class TestCatalogContracts(IntegrationTestCase):
 				return_value=SimpleNamespace(name="CUST-001"),
 			),
 			patch("roti_ropi_pos.mobile_pos.catalog.get_item_details", return_value=details),
+			patch("roti_ropi_pos.mobile_pos.catalog._has_effective_conversion", return_value=True),
 			patch("roti_ropi_pos.mobile_pos.catalog.get_stock_availability", return_value=(12, True, False)),
 			patch("roti_ropi_pos.mobile_pos.catalog.frappe.utils.today", return_value="2026-07-27"),
 		):

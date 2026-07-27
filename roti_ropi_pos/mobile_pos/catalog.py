@@ -7,6 +7,7 @@ from erpnext.accounts.doctype.pos_invoice.pos_invoice import get_stock_availabil
 from erpnext.accounts.doctype.pos_profile.pos_profile import get_item_groups
 from erpnext.selling.page.point_of_sale.point_of_sale import get_items
 from erpnext.stock.doctype.batch.batch import get_batch_qty
+from erpnext.stock.get_item_details import get_conversion_factor as get_item_conversion_factor
 from erpnext.stock.get_item_details import get_item_details
 
 from roti_ropi_pos.mobile_pos.authorization import require_doc_permission
@@ -160,7 +161,7 @@ def quote_item(
 	details = get_item_details(ctx, doc={"doctype": "POS Invoice", **ctx})
 	factor = details.get("conversion_factor")
 	warnings = []
-	if uom != item.stock_uom and not factor:
+	if uom != item.stock_uom and not _has_effective_conversion(item_code, uom, item.stock_uom):
 		warnings.append(MISSING_UOM_CONVERSION)
 	factor = factor or 1
 	if batch_no:
@@ -218,10 +219,19 @@ def _require_allowed_item(item, profile) -> None:
 
 
 def _item_conversion_factor(item_code: str, uom: str) -> Decimal | None:
-	factor = frappe.db.get_value(
-		"UOM Conversion Detail", {"parent": item_code, "uom": uom}, "conversion_factor"
-	)
+	factor = get_item_conversion_factor(item_code, uom).get("conversion_factor")
 	return Decimal(str(factor)) if factor and Decimal(str(factor)) > 0 else None
+
+
+def _has_effective_conversion(item_code: str, uom: str, stock_uom: str) -> bool:
+	if uom == stock_uom:
+		return True
+	if frappe.db.exists("UOM Conversion Detail", {"parent": item_code, "uom": uom}):
+		return True
+	return bool(
+		frappe.db.exists("UOM Conversion Factor", {"from_uom": uom, "to_uom": stock_uom})
+		or frappe.db.exists("UOM Conversion Factor", {"from_uom": stock_uom, "to_uom": uom})
+	)
 
 
 def _validate_batch_identity(batch_no: str, item, profile) -> None:
