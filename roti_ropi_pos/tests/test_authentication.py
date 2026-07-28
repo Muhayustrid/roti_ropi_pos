@@ -231,6 +231,14 @@ class TestAuthentication(IntegrationTestCase):
 		with self._request(path="/api/method/login", form={"cmd": "login"}):
 			validate_mobile_api_scope()
 
+	def test_administrator_is_not_scoped_as_mobile_cashier(self):
+		with self._request(
+			path="/api/method/frappe.client.get",
+			user="Administrator",
+			form={"cmd": "frappe.client.get"},
+		):
+			validate_mobile_api_scope()
+
 	def test_mobile_authorize_and_approve_require_pkce_s256(self):
 		for path in (
 			"/api/method/frappe.integrations.oauth2.authorize",

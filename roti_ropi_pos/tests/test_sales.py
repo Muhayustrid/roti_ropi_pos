@@ -14,7 +14,7 @@ from frappe.tests import IntegrationTestCase
 from roti_ropi_pos.api.v1 import sales as sales_api
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.mobile_pos.invoices import submit_sale
-from roti_ropi_pos.tests.helpers import make_cashier, make_opening_entry
+from roti_ropi_pos.tests.helpers import close_test_openings, make_cashier, make_opening_entry
 from roti_ropi_pos.tests.test_sessions import COMPANY, WAREHOUSE, make_valid_profile
 
 
@@ -56,9 +56,7 @@ class TestSaleSubmit(IntegrationTestCase):
 		frappe.db.set_single_value("POS Settings", "invoice_type", "POS Invoice")
 		self.cashier = make_cashier(f"sales-{frappe.generate_hash(length=8)}@rotiropi.test")
 		self._clear_user_permissions(self.cashier)
-		self.profile = make_valid_profile(
-			f"Mobile POS Sale {frappe.generate_hash(length=8)}", self.cashier
-		)
+		self.profile = make_valid_profile(f"Mobile POS Sale {frappe.generate_hash(length=8)}", self.cashier)
 		frappe.clear_cache(doctype="POS Invoice")
 		frappe.clear_cache(user=self.cashier)
 		self.opening = make_opening_entry(
@@ -86,12 +84,15 @@ class TestSaleSubmit(IntegrationTestCase):
 		self.assertTrue(frappe.has_permission("Customer", ptype="read"))
 		self.assertTrue(frappe.has_permission("Item", ptype="read", doc=frappe.get_doc("Item", self.item)))
 		self.assertTrue(
-			frappe.has_permission("Customer", ptype="read", doc=frappe.get_doc("Customer", self.profile.customer))
+			frappe.has_permission(
+				"Customer", ptype="read", doc=frappe.get_doc("Customer", self.profile.customer)
+			)
 		)
 
 	def tearDown(self) -> None:
-		frappe.db.set_single_value("POS Settings", "invoice_type", self.saved_pos_mode or "POS Invoice")
 		frappe.set_user("Administrator")
+		close_test_openings(self.cashier)
+		frappe.db.set_single_value("POS Settings", "invoice_type", self.saved_pos_mode or "POS Invoice")
 		super().tearDown()
 
 	def test_sale_parser_accepts_normal_item_and_payment_lists(self):
@@ -305,7 +306,9 @@ class TestSaleSubmit(IntegrationTestCase):
 				frappe.local.request = request
 		self.assertEqual(sum(result.get("ok", False) for result in results), 1)
 		self.assertEqual(
-			frappe.db.count("POS Invoice", {"custom_mobile_pos_transaction_id": ["in", keys], "docstatus": 1}),
+			frappe.db.count(
+				"POS Invoice", {"custom_mobile_pos_transaction_id": ["in", keys], "docstatus": 1}
+			),
 			1,
 		)
 
@@ -484,7 +487,9 @@ class TestSaleSubmit(IntegrationTestCase):
 			"customer": None,
 			"walk_in_customer_name": None,
 			"client_accepted_grand_total": "100",
-			"items": [{"item_code": self.item, "qty": "1", "uom": self.uom, "batch_no": None, "serial_numbers": []}],
+			"items": [
+				{"item_code": self.item, "qty": "1", "uom": self.uom, "batch_no": None, "serial_numbers": []}
+			],
 			"payments": [{"mode_of_payment": "Cash", "amount": "100", "reference_no": None}],
 		}
 		payload.update(overrides)

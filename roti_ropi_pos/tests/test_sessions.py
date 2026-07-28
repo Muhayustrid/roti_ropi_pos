@@ -8,7 +8,7 @@ from frappe.tests import IntegrationTestCase
 from roti_ropi_pos.api.v1 import sessions as sessions_api
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.mobile_pos.sessions import open_session
-from roti_ropi_pos.tests.helpers import make_cashier, make_opening_entry
+from roti_ropi_pos.tests.helpers import close_test_openings, make_cashier, make_opening_entry
 
 COMPANY = "_Test Company"
 WAREHOUSE = "_Test Warehouse - _TC"
@@ -28,8 +28,9 @@ class TestSessions(IntegrationTestCase):
 		)
 
 	def tearDown(self) -> None:
-		frappe.db.set_single_value("POS Settings", "invoice_type", self.saved_pos_mode or "POS Invoice")
 		frappe.set_user("Administrator")
+		close_test_openings(self.cashier)
+		frappe.db.set_single_value("POS Settings", "invoice_type", self.saved_pos_mode or "POS Invoice")
 		super().tearDown()
 
 	def test_current_reuses_shared_lookup_and_preserves_stale_warning(self):

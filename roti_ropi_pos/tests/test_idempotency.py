@@ -20,6 +20,7 @@ from roti_ropi_pos.mobile_pos.idempotency import (
 	normalize_for_hash,
 	verify_business_reference,
 )
+from roti_ropi_pos.tests.helpers import close_test_openings
 
 KEY = "6ba7b810-9dad-41d1-80b4-00c04fd430c8"
 KEY_DEL1 = "6ba7b810-9dad-41d1-80b4-00c04fd430c9"
@@ -256,6 +257,8 @@ class TestIdempotency(IntegrationTestCase):
 			self._assert_twenty_concurrent_attempts_create_one_opening_and_one_request()
 		finally:
 			_restore_request(request)
+			frappe.set_user("Administrator")
+			close_test_openings(getattr(self, "_concurrent_user", ""))
 			frappe.set_user(user)
 
 	def _assert_twenty_concurrent_attempts_create_one_opening_and_one_request(self):
@@ -269,6 +272,7 @@ class TestIdempotency(IntegrationTestCase):
 			"Stock User",
 			"Item Manager",
 		).name
+		self._concurrent_user = user
 		frappe.set_user(user)
 		mode = frappe.get_doc("Mode of Payment", "Cash")
 		if not frappe.db.exists("Mode of Payment Account", {"parent": "Cash", "company": "_Test Company"}):

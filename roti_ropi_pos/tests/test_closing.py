@@ -7,7 +7,7 @@ from erpnext.stock.doctype.stock_entry.stock_entry_utils import make_stock_entry
 from frappe.tests import IntegrationTestCase
 
 from roti_ropi_pos.api.v1 import closing as closing_api
-from roti_ropi_pos.tests.helpers import make_cashier, make_opening_entry
+from roti_ropi_pos.tests.helpers import close_test_openings, make_cashier, make_opening_entry
 from roti_ropi_pos.tests.test_sessions import COMPANY, WAREHOUSE, make_valid_profile
 
 ITEM = "_Test Item"
@@ -29,9 +29,7 @@ class TestClosingPreview(IntegrationTestCase):
 		self.profile.selling_price_list = frappe.db.get_value(
 			"Price List", {"selling": 1, "enabled": 1, "currency": self.profile.currency}, "name"
 		)
-		self.profile.append(
-			"item_groups", {"item_group": frappe.db.get_value("Item", ITEM, "item_group")}
-		)
+		self.profile.append("item_groups", {"item_group": frappe.db.get_value("Item", ITEM, "item_group")})
 		self.profile.save(ignore_permissions=True)
 		self._ensure_item_price()
 		make_stock_entry(target=WAREHOUSE, item_code=ITEM, qty=20, basic_rate=100)
@@ -46,8 +44,9 @@ class TestClosingPreview(IntegrationTestCase):
 		frappe.set_user(self.cashier)
 
 	def tearDown(self) -> None:
-		frappe.db.set_single_value("POS Settings", "invoice_type", self.saved_pos_mode or "POS Invoice")
 		frappe.set_user("Administrator")
+		close_test_openings(self.cashier)
+		frappe.db.set_single_value("POS Settings", "invoice_type", self.saved_pos_mode or "POS Invoice")
 		super().tearDown()
 
 	def test_preview_returns_opening_session_and_empty_invoice_count(self):
@@ -86,7 +85,11 @@ class TestClosingPreview(IntegrationTestCase):
 
 	def test_preview_stale_opening_warning_preserved(self):
 		frappe.db.set_value(
-			"POS Opening Entry", self.opening, "period_start_date", "2026-07-01 08:00:00", update_modified=False
+			"POS Opening Entry",
+			self.opening,
+			"period_start_date",
+			"2026-07-01 08:00:00",
+			update_modified=False,
 		)
 		result = closing_api.preview(pos_profile=self.profile.name)
 		warnings = result["data"]["opening_session"]["warnings"]
@@ -94,9 +97,7 @@ class TestClosingPreview(IntegrationTestCase):
 
 	def test_preview_requires_active_opening(self):
 		frappe.set_user("Administrator")
-		frappe.db.set_value(
-			"POS Opening Entry", self.opening, "status", "Closed", update_modified=False
-		)
+		frappe.db.set_value("POS Opening Entry", self.opening, "status", "Closed", update_modified=False)
 		frappe.set_user(self.cashier)
 		result = closing_api.preview(pos_profile=self.profile.name)
 		self.assertFalse(result["ok"])
@@ -191,9 +192,7 @@ class TestClosingPreview(IntegrationTestCase):
 		self._submit_sale()
 		closing_name = self._close(str(uuid4()))["data"]["closing"]["name"]
 		frappe.db.set_value("POS Closing Entry", closing_name, "status", "Failed")
-		frappe.db.set_value(
-			"POS Closing Entry", closing_name, "error_message", "SECRET internal traceback"
-		)
+		frappe.db.set_value("POS Closing Entry", closing_name, "error_message", "SECRET internal traceback")
 		frappe.set_user(self.cashier)
 		result = closing_api.status(name=closing_name)
 		self.assertTrue(result["ok"])
@@ -222,8 +221,9 @@ class TestClosingPreview(IntegrationTestCase):
 
 	def test_on_submit_sync_threshold_is_ten(self):
 		"""on_submit calls super < 10 invoices, defers >= 10. Fails on ERPNext threshold change."""
-		import roti_ropi_pos.overrides.pos_closing_entry as _ov
 		from erpnext.accounts.doctype.pos_closing_entry.pos_closing_entry import POSClosingEntry
+
+		import roti_ropi_pos.overrides.pos_closing_entry as _ov
 
 		class _Fake(_ov.MobilePOSClosingEntry):
 			pass

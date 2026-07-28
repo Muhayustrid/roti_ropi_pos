@@ -6,7 +6,12 @@ from frappe.tests import IntegrationTestCase
 from roti_ropi_pos.api.v1 import bootstrap as bootstrap_api
 from roti_ropi_pos.mobile_pos.authorization import get_capabilities
 from roti_ropi_pos.mobile_pos.profiles import list_assigned_profiles, profile_dto
-from roti_ropi_pos.tests.helpers import make_cashier, make_opening_entry, make_pos_profile
+from roti_ropi_pos.tests.helpers import (
+	close_test_openings,
+	make_cashier,
+	make_opening_entry,
+	make_pos_profile,
+)
 
 COMPANY = "_Test Company"
 WAREHOUSE = "_Test Warehouse - _TC"
@@ -29,8 +34,9 @@ class TestBootstrap(IntegrationTestCase):
 		)
 
 	def tearDown(self) -> None:
-		frappe.db.set_single_value("POS Settings", "invoice_type", self.saved_pos_mode or "POS Invoice")
 		frappe.set_user("Administrator")
+		close_test_openings(self.cashier, self.other)
+		frappe.db.set_single_value("POS Settings", "invoice_type", self.saved_pos_mode or "POS Invoice")
 		super().tearDown()
 
 	def test_bootstrap_returns_safe_assigned_profile_and_auto_selects_single(self):

@@ -41,7 +41,7 @@ def validate_mobile_oauth_request(path: str, user: str) -> None:
 	authorization = frappe.get_request_header("Authorization", "")
 	client_id = frappe.form_dict.get("client_id") or _basic_username(authorization)
 	is_mobile_client = bool(mobile_client_id and client_id == mobile_client_id)
-	is_mobile_cashier = user != "Guest" and CASHIER_ROLE in frappe.get_roles(user)
+	is_mobile_cashier = _is_mobile_cashier(user)
 	command = frappe.form_dict.get("cmd")
 	is_login_submit = path == "/api/method/login" and command == "login"
 
@@ -77,6 +77,13 @@ def _basic_username(authorization: str) -> str | None:
 		return None
 
 
+def _is_mobile_cashier(user: str) -> bool:
+	return bool(
+		user not in {"Guest", "Administrator"}
+		and frappe.db.exists("Has Role", {"parent": user, "role": CASHIER_ROLE})
+	)
+
+
 def validate_mobile_api_scope() -> None:
 	"""Restrict Mobile POS OAuth and cashier requests before endpoint dispatch."""
 	path = frappe.request.path
@@ -101,10 +108,10 @@ def validate_mobile_api_scope() -> None:
 			or not token.expiration_time
 			or frappe.utils.now_datetime() >= token.expiration_time
 			or not frappe.db.get_value("User", user, "enabled")
-			or CASHIER_ROLE not in frappe.get_roles(user)
+			or not _is_mobile_cashier(user)
 		):
 			raise frappe.AuthenticationError("The Mobile POS bearer token is not authorized.")
 		return
 
-	if user != "Guest" and CASHIER_ROLE in frappe.get_roles(user) and path not in MOBILE_POS_BROWSER_PATHS:
+	if _is_mobile_cashier(user) and path not in MOBILE_POS_BROWSER_PATHS:
 		raise frappe.PermissionError("This account may access only the Mobile POS API.")

@@ -1104,7 +1104,7 @@ Review the intended diff, report the proposed English commit message `feat: add 
 
 ### Task 9: Backend End-to-End Security, Upgrade, and Release Gate
 
-**Status:** **Proposed**
+**Status:** **Backend local gate complete; staging evidence pending**
 
 **Files:**
 - Create: `roti_ropi_pos/tests/test_mobile_pos_flow.py`
@@ -1116,15 +1116,15 @@ Review the intended diff, report the proposed English commit message `feat: add 
 - Consumes: all v1 endpoints and installed hooks.
 - Produces: executable evidence for one complete POS lifecycle and documented operational setup.
 
-- [ ] **Step 1: Write the end-to-end lifecycle test**
+- [x] **Step 1: Write the end-to-end lifecycle test**
 
 Exercise OAuth bearer bootstrap and prior-day stale-opening warning using an existing Open fixture. Continue the lifecycle with that opening, or close it before testing creation of a new opening; never attempt to open a second session while the stale opening remains Open. Then exercise customer search/default walk-in selection, catalog search, bakery batch-UOM scan, quote, fully settled multi-mode sale, lost-response replay, history, partial return with preserved and appended remarks, closing preview, closing submit, and final status using one cashier with only `Mobile POS Cashier`.
 
-- [ ] **Step 2: Write source-contract tests**
+- [x] **Step 2: Write source-contract tests**
 
 Assert installed callable signatures, effective barcode override behavior, required POS document fields, POS Invoice mode, core synchronous/queued closing threshold assumptions, internal closing commit behavior, and Frappe auth-hook/override dispatch behavior. Fail with a message naming the source boundary that must be re-audited.
 
-- [ ] **Step 3: Run the complete backend gate**
+- [x] **Step 3: Run the complete backend gate**
 
 ```bash
 bench --site development.localhost migrate
@@ -1151,15 +1151,19 @@ pre-commit run --all-files
 
 Before Task 9 execution, verify every exact module path against the installed source. A missing or renamed suite is a hard stop requiring source-contract review; do not guess a replacement path. Expected: every verified command exits 0 with no failed tests or hooks.
 
+**Local evidence (2026-07-28):** Migration passed. Final app gate ran 177 tests with `OK`. Focused Mobile POS modules, bakery barcode scanner, bakery Price Group (7 passed, 1 upstream skip), ERPNext POS/stock/opening/invoice/closing/merge-log suites, Frappe client/OAuth suites, and `pre-commit run --all-files` passed. Source-contract coverage verifies installed signatures plus runtime auth-hook, barcode-method, and closing-controller dispatch. Frappe client regression exposed implicit `Administrator` role expansion; auth scope now uses explicit `Has Role` membership and excludes `Administrator`.
+
+Shared development-site history required approved cleanup of 897 committed test openings and reversible isolation of one operational opening plus 597 old unconsolidated invoices while core ERPNext tests ran. Restoration was verified: `POS-OPE-2026-00004` is Open, no `__TASK9_TEMP__` markers remain, and two `Outlet Training` invoices remain unconsolidated. This was local test-environment cleanup, not production migration.
+
 - [ ] **Step 4: Perform staging API smoke tests**
 
 Use a dedicated staging cashier and OAuth Authorization Code with PKCE S256. Record request IDs and ERPNext document names for bootstrap, customer search, open, scan, submit, replay, return, close, and status. Verify that a prior-day submitted/unclosed opening remains visible with `posting_date`, `period_start_date`, and `STALE_OPENING`. With developer mode disabled and active workers, close at least ten POS Invoice rows and record the real `queued` to `submitted` transition. Confirm the bearer token is denied from core method/resource routes and that no tokens, verifiers, authorization codes, or stack traces appear in logs.
 
-- [ ] **Step 5: Update implementation status in the documents**
+- [x] **Step 5: Update implementation status in the documents**
 
 Update evidence status whenever new executable or installed-source evidence justifies it and add exact source references. When verified behavior differs from the proposal, record the deviation and fail the release gate pending an explicit contract decision. Preserve approved Phase 0 decisions; never rewrite an Approved invariant merely to match an accidental implementation, and version approved breaking changes as v2.
 
-- [ ] **Step 6: Prepare release evidence and documentation for user review**
+- [x] **Step 6: Prepare release evidence and documentation for user review**
 
 Review the intended diff, report the proposed English commit message `test: verify mobile POS lifecycle`, and wait for explicit commit approval.
 
