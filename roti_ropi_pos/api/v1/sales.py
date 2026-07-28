@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 from decimal import Decimal
 
 import frappe
@@ -8,7 +9,11 @@ from roti_ropi_pos.api.v1.bootstrap import mobile_pos_endpoint
 from roti_ropi_pos.mobile_pos.authorization import get_authorized_profile
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.mobile_pos.idempotency import execute_idempotent
+from roti_ropi_pos.mobile_pos.invoices import create_return as create_return_service
+from roti_ropi_pos.mobile_pos.invoices import get_sale as get_sale_service
+from roti_ropi_pos.mobile_pos.invoices import list_sales as list_sales_service
 from roti_ropi_pos.mobile_pos.invoices import submit_sale
+from roti_ropi_pos.mobile_pos.responses import success
 from roti_ropi_pos.mobile_pos.validation import decimal_string, require_json_object
 
 
@@ -23,6 +28,49 @@ def submit(**kwargs) -> dict:
 		"v1.sales.submit",
 		payload,
 		lambda transaction_id: submit_sale(payload, transaction_id),
+	)
+
+
+@frappe.whitelist(methods=["GET"])
+@mobile_pos_endpoint
+def list(pos_profile=None, status=None, q="", start=0, limit=20) -> dict:
+	"""Return POS Invoice-only history for one authorized profile."""
+	if not isinstance(pos_profile, str) or not pos_profile.strip():
+		raise _invalid("pos_profile", "Expected a POS Profile name.")
+	if status not in {"all", "paid", "return", "consolidated", "cancelled"}:
+		raise _invalid("status", "Expected all, paid, return, consolidated, or cancelled.")
+	if not isinstance(q, str):
+		raise _invalid("q", "Expected a string.")
+	profile = get_authorized_profile(pos_profile.strip())
+	return success(
+		list_sales_service(
+			profile,
+			status=status,
+			q=q.strip(),
+			start=_integer(start, "start", minimum=0),
+			limit=min(_integer(limit, "limit", minimum=1), 100),
+		)
+	)
+
+
+@frappe.whitelist(methods=["GET"])
+@mobile_pos_endpoint
+def get(name=None) -> dict:
+	"""Return one scoped POS Invoice detail."""
+	if not isinstance(name, str) or not name.strip():
+		raise _invalid("name", "Expected a POS Invoice name.")
+	return success(get_sale_service(name.strip()))
+
+
+@frappe.whitelist(methods=["POST"])
+@mobile_pos_endpoint
+def create_return(**kwargs) -> dict:
+	"""Submit one idempotent POS Invoice return."""
+	payload = _parse_return_payload(dict(frappe.form_dict))
+	return execute_idempotent(
+		"v1.sales.create_return",
+		payload,
+		lambda transaction_id: create_return_service(payload, transaction_id),
 	)
 
 
@@ -69,8 +117,41 @@ def _parse_sale_payload(value) -> dict:
 	}
 
 
+def _parse_return_payload(value) -> dict:
+	value.pop("cmd", None)
+	payload = require_json_object(value, field="payload")
+	_unknown(payload, {"source_name", "reason", "items", "payments"})
+	reason = _name(payload.get("reason"), "reason", "Expected a non-empty return reason.")
+	items = payload.get("items")
+	if not isinstance(items, builtins.list) or not items:
+		raise _invalid("items", "Expected a non-empty array of items.")
+	parsed_items = []
+	for row in items:
+		if not isinstance(row, dict):
+			raise _invalid("items", "Each row must be an object.")
+		_unknown(row, {"row_id", "qty"})
+		parsed_items.append(
+			{
+				"row_id": _name(row.get("row_id"), "row_id", "Expected a POS Invoice Item row ID."),
+				"qty": _positive_decimal(row.get("qty"), "qty"),
+			}
+		)
+	if len({row["row_id"] for row in parsed_items}) != len(parsed_items):
+		raise _invalid("items", "Duplicate row_id values are not accepted.")
+	return {
+		"source_name": _name(payload.get("source_name"), "source_name", "Expected a POS Invoice name."),
+		"reason": reason,
+		"items": parsed_items,
+		"payments": _return_payments(payload.get("payments")),
+	}
+
+
+def _return_payments(value) -> list[dict]:
+	return _payments(value, positive=False)
+
+
 def _items(value) -> list[dict]:
-	if not isinstance(value, list) or not value:
+	if not isinstance(value, builtins.list) or not value:
 		raise _invalid("items", "Expected a non-empty array of items.")
 	items = []
 	for index, row in enumerate(value):
@@ -79,7 +160,7 @@ def _items(value) -> list[dict]:
 		_unknown(row, {"item_code", "qty", "uom", "batch_no", "serial_numbers"})
 		batch_no = _optional_name(row.get("batch_no"), "batch_no", "Expected a Batch name or null.")
 		serial_numbers = row.get("serial_numbers", [])
-		if not isinstance(serial_numbers, list) or not all(
+		if not isinstance(serial_numbers, builtins.list) or not all(
 			isinstance(serial_no, str) and serial_no.strip() for serial_no in serial_numbers
 		):
 			raise _invalid("serial_numbers", "Expected an array of serial number strings.")
@@ -97,20 +178,23 @@ def _items(value) -> list[dict]:
 	return items
 
 
-def _payments(value) -> list[dict]:
-	if not isinstance(value, list) or not value:
+def _payments(value, *, positive: bool = True) -> list[dict]:
+	if not isinstance(value, builtins.list) or not value:
 		raise _invalid("payments", "Expected a non-empty array of payments.")
 	payments = []
 	for index, row in enumerate(value):
 		if not isinstance(row, dict):
 			raise _invalid("payments", f"Row {index} must be an object.")
 		_unknown(row, {"mode_of_payment", "amount", "reference_no"})
+		amount = decimal_string(row.get("amount"), field="amount")
+		if (positive and amount <= 0) or (not positive and amount >= 0):
+			raise _invalid("amount", f"Expected a {'positive' if positive else 'negative'} decimal string.")
 		payments.append(
 			{
 				"mode_of_payment": _name(
 					row.get("mode_of_payment"), "mode_of_payment", "Expected a payment mode name."
 				),
-				"amount": _positive_decimal(row.get("amount"), "amount"),
+				"amount": amount,
 				"reference_no": _optional_name(
 					row.get("reference_no"), "reference_no", "Expected a reference number or null."
 				),
@@ -135,6 +219,20 @@ def _optional_name(value, field: str, reason: str) -> str | None:
 	if value is None:
 		return None
 	return _name(value, field, reason)
+
+
+def _integer(value, field: str, *, minimum: int) -> int:
+	if isinstance(value, bool) or isinstance(value, float):
+		raise _invalid(field, "Expected an integer.")
+	if isinstance(value, int):
+		integer = value
+	elif isinstance(value, str) and value.isdigit():
+		integer = int(value)
+	else:
+		raise _invalid(field, "Expected an integer.")
+	if integer < minimum:
+		raise _invalid(field, f"Expected an integer greater than or equal to {minimum}.")
+	return integer
 
 
 def _positive_decimal(value, field: str) -> Decimal:
