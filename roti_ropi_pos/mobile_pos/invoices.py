@@ -64,6 +64,177 @@ def submit_sale(payload: dict, transaction_id: str) -> MutationResult:
 	)
 
 
+def list_sales(profile, *, status: str, q: str, start: int, limit: int) -> dict:
+	"""Return permission-aware POS Invoice history for one authorized profile."""
+	filters = {"owner": frappe.session.user, "pos_profile": profile.name, "company": profile.company}
+	if status != "all":
+		filters["status"] = ["in", {"paid": ["Paid", "Credit Note Issued"]}.get(status, [status.title()])]
+	or_filters = None
+	if q:
+		or_filters = [
+			{"name": ["like", f"%{q}%"]},
+			{"customer": ["like", f"%{q}%"]},
+			{"custom_walk_in_customer_name": ["like", f"%{q}%"]},
+		]
+	docs = frappe.get_list(
+		"POS Invoice",
+		filters=filters,
+		or_filters=or_filters,
+		fields=[
+			"name",
+			"status",
+			"customer",
+			"custom_walk_in_customer_name",
+			"currency",
+			"grand_total",
+			"paid_amount",
+			"change_amount",
+			"posting_date",
+			"posting_time",
+		],
+		order_by="posting_date desc, posting_time desc, name desc",
+		start=start,
+		page_length=limit + 1,
+	)
+	has_more = len(docs) > limit
+	return {"sales": [sale_summary(doc) for doc in docs[:limit]], "page": {"start": start, "limit": limit, "has_more": has_more}}
+
+
+def get_sale(name: str) -> dict:
+	"""Return one source-visible POS Invoice detail."""
+	return {"sale": sale_detail(_source_invoice(name))}
+
+
+def create_return(payload: dict, transaction_id: str) -> MutationResult:
+	"""Create a scoped POS Invoice return through ERPNext's mapper."""
+	source = _source_invoice_for_return(payload["source_name"])
+	try:
+		profile = get_authorized_profile(source.pos_profile)
+	except MobilePOSAPIError as error:
+		if error.code == "PROFILE_SCOPE_MISMATCH":
+			raise _not_found() from error
+		raise
+	if source.company != profile.company:
+		raise _not_found()
+	require_doc_permission("POS Invoice", "create")
+	require_doc_permission("POS Invoice", "submit")
+	from erpnext.accounts.doctype.pos_invoice.pos_invoice import make_sales_return
+
+	return_invoice = make_sales_return(source.name)
+	requested = {row["row_id"]: row["qty"] for row in payload["items"]}
+	rows = {row.pos_invoice_item: row for row in return_invoice.items}
+	if set(requested) - set(rows):
+		raise _invalid_request("items", "Each row_id must be returnable from this sale.")
+	return_invoice.set("items", [])
+	for row_id, qty in requested.items():
+		row = rows[row_id]
+		if qty > abs(Decimal(str(row.qty))):
+			raise _invalid_request("items", "Requested quantity exceeds the remaining returnable quantity.")
+		row.qty = -float(qty)
+		return_invoice.append("items", row)
+	return_invoice.set("payments", [])
+	allowed_modes = {
+		row.mode_of_payment
+		for row in profile.payments
+		if row.allow_in_returns and frappe.get_cached_value("Mode of Payment", row.mode_of_payment, "enabled")
+	}
+	seen_modes = set()
+	for payment in payload["payments"]:
+		if payment["mode_of_payment"] not in allowed_modes:
+			raise _invalid_payment(payment["mode_of_payment"], "Payment mode is not available for returns.")
+		if payment["mode_of_payment"] in seen_modes:
+			raise _invalid_payment(payment["mode_of_payment"], "Payment mode is duplicated.")
+		seen_modes.add(payment["mode_of_payment"])
+		return_invoice.append(
+			"payments",
+			{
+				"mode_of_payment": payment["mode_of_payment"],
+				"amount": float(payment["amount"]),
+				"reference_no": payment["reference_no"],
+			},
+		)
+	return_reason = f"Mobile POS Return Reason: {payload['reason']}"
+	return_invoice.remarks = "\n".join(
+		dict.fromkeys(
+			line
+			for value in (source.remarks, return_invoice.remarks, return_reason)
+			if value
+			for line in value.splitlines()
+			if line
+		)
+	)
+	return_invoice.custom_mobile_pos_transaction_id = transaction_id
+	return_invoice.calculate_taxes_and_totals()
+	return_invoice.set_paid_amount()
+	return_invoice.set_account_for_mode_of_payment()
+	return_invoice.set_outstanding_amount()
+	if Decimal(str(return_invoice.paid_amount)) != Decimal(str(return_invoice.grand_total)):
+		raise _invalid_payment(None, "Return payments must exactly settle the return.")
+	return_invoice.insert()
+	return_invoice.submit()
+	return MutationResult(
+		data={"sale": sale_detail(return_invoice)},
+		reference_doctype="POS Invoice",
+		reference_name=return_invoice.name,
+	)
+
+
+def _source_invoice(name: str):
+	metadata = frappe.get_list(
+		"POS Invoice",
+		filters={"name": name, "owner": frappe.session.user},
+		fields=["name", "pos_profile", "company"],
+		limit_page_length=1,
+	)
+	if not metadata:
+		raise _not_found()
+	profile = _source_profile(metadata[0])
+	doc = frappe.get_doc("POS Invoice", name)
+	require_doc_permission("POS Invoice", "read", doc)
+	if doc.owner != frappe.session.user or doc.pos_profile != profile.name or doc.company != profile.company:
+		raise _not_found()
+	return doc
+
+
+def _source_invoice_for_return(name: str):
+	metadata = frappe.get_list(
+		"POS Invoice",
+		filters={"name": name, "owner": frappe.session.user, "docstatus": 1, "is_return": 0},
+		fields=["name", "pos_profile", "company"],
+		limit_page_length=1,
+	)
+	if not metadata:
+		raise _not_found()
+	profile = _source_profile(metadata[0])
+	doc = frappe.get_doc("POS Invoice", name)
+	require_doc_permission("POS Invoice", "read", doc)
+	if doc.owner != frappe.session.user or doc.pos_profile != profile.name or doc.company != profile.company:
+		raise _not_found()
+	return doc
+
+
+def _source_profile(metadata):
+	try:
+		profile = get_authorized_profile(metadata.pos_profile)
+	except MobilePOSAPIError as error:
+		if error.code == "PROFILE_SCOPE_MISMATCH":
+			raise _not_found() from error
+		raise
+	if metadata.company != profile.company:
+		raise _not_found()
+	return profile
+
+
+def _not_found() -> MobilePOSAPIError:
+	return MobilePOSAPIError("RESOURCE_NOT_FOUND", "The sale is not available.", status=404)
+
+
+def _invalid_request(field: str, reason: str) -> MobilePOSAPIError:
+	return MobilePOSAPIError(
+		"INVALID_REQUEST", f"{field} is invalid.", details={"field": field, "reason": reason}
+	)
+
+
 def _validate_total_stock(profile, items: list[dict]) -> None:
 	requested = {}
 	for row in items:
@@ -244,9 +415,9 @@ def _verify_fully_settled(invoice) -> None:
 
 def sale_summary(doc) -> dict:
 	return {
-		"doctype": doc.doctype,
+		"doctype": "POS Invoice",
 		"name": doc.name,
-		"status": (doc.status or "").lower(),
+		"status": "paid" if doc.status == "Credit Note Issued" else (doc.status or "").lower(),
 		"customer": doc.customer,
 		"walk_in_customer_name": doc.custom_walk_in_customer_name or None,
 		"currency": doc.currency,
@@ -254,7 +425,7 @@ def sale_summary(doc) -> dict:
 		"paid_amount": _decimal(doc.paid_amount),
 		"change_amount": _decimal(doc.change_amount),
 		"posting_date": str(doc.posting_date),
-		"posting_time": str(doc.posting_time),
+		"posting_time": _time(doc.posting_time),
 	}
 
 
@@ -318,6 +489,12 @@ def _invalid_payment(mode: str | None, reason: str) -> MobilePOSAPIError:
 		status=422,
 		details={"mode_of_payment": mode, "reason": reason},
 	)
+
+
+def _time(value) -> str:
+	hours, minutes, seconds = str(value).split(":", 2)
+	seconds, dot, fraction = seconds.partition(".")
+	return f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}{dot}{fraction}"
 
 
 def _decimal(value) -> str:

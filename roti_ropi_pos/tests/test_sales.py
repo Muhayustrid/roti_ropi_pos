@@ -94,6 +94,11 @@ class TestSaleSubmit(IntegrationTestCase):
 		frappe.set_user("Administrator")
 		super().tearDown()
 
+	def test_sale_parser_accepts_normal_item_and_payment_lists(self):
+		payload = sales_api._parse_sale_payload(self._payload())
+		self.assertEqual(payload["items"][0]["item_code"], self.item)
+		self.assertEqual(payload["payments"][0]["amount"], Decimal("100"))
+
 	def test_submit_creates_paid_invoice_with_zero_outstanding(self):
 		result = self._submit()
 		invoice = frappe.get_doc("POS Invoice", result["data"]["sale"]["summary"]["name"])
@@ -321,9 +326,153 @@ class TestSaleSubmit(IntegrationTestCase):
 		self.assertFalse(result["ok"])
 		self.assertEqual(result["error"]["code"], "INVALID_REQUEST")
 
+	def test_history_returns_scoped_pos_invoices_and_walk_in_search(self):
+		matching = self._submit(walk_in_customer_name="Ayu")
+		non_matching = self._submit(walk_in_customer_name="Bima")
+		frappe.db.set_value(
+			"POS Invoice", non_matching["data"]["sale"]["summary"]["name"], "pos_profile", "Not This Profile"
+		)
+		result = self._history(pos_profile=self.profile.name, status="all", limit="101")
+		self.assertTrue(result["ok"])
+		self.assertEqual(result["data"]["sales"], [matching["data"]["sale"]["summary"]])
+		self.assertEqual(result["data"]["page"], {"start": 0, "limit": 100, "has_more": False})
+		self.assertEqual(result["data"]["sales"][0]["doctype"], "POS Invoice")
+		self.assertEqual(
+			self._history(pos_profile=self.profile.name, status="paid", q="ayu")["data"]["sales"],
+			[matching["data"]["sale"]["summary"]],
+		)
+		self.assertFalse(self._get_sale(non_matching["data"]["sale"]["summary"]["name"])["ok"])
+		self.assertEqual(frappe.response["http_status_code"], 404)
+
+	def test_history_requires_allowed_status_and_maps_credit_note_to_paid(self):
+		sale = self._submit()["data"]["sale"]
+		frappe.db.set_value("POS Invoice", sale["summary"]["name"], "status", "Credit Note Issued")
+		result = self._history(pos_profile=self.profile.name, status="paid")
+		self.assertEqual(result["data"]["sales"], [{**sale["summary"], "status": "paid"}])
+		result = self._history(pos_profile=self.profile.name, status="bad")
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["details"]["field"], "status")
+
+	def test_history_accepts_integer_pagination_and_rejects_non_integers(self):
+		result = self._history(pos_profile=self.profile.name, status="all", start="0", limit="1")
+		self.assertTrue(result["ok"])
+		self.assertEqual(result["data"]["page"], {"start": 0, "limit": 1, "has_more": False})
+		result = self._history(pos_profile=self.profile.name, status="all", start=0.5)
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["details"]["field"], "start")
+		result = self._history(pos_profile=self.profile.name, status="all", limit=True)
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["details"]["field"], "limit")
+
+	def test_return_parser_accepts_negative_payment_and_rejects_positive_payment(self):
+		sale = self._submit()["data"]["sale"]
+		self._allow_cash_returns()
+		result = self._return(self._return_payload(sale, qty="1", amount="-100"))
+		self.assertTrue(result["ok"])
+		invoice = frappe.get_doc("POS Invoice", result["data"]["sale"]["summary"]["name"])
+		self.assertEqual(Decimal(str(invoice.payments[0].amount)), Decimal("-100"))
+		result = self._return(self._return_payload(sale, qty="1", amount="100"))
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["details"]["field"], "amount")
+
+	def test_sale_detail_maps_credit_note_issued_to_paid(self):
+		result = self._submit()
+		name = result["data"]["sale"]["summary"]["name"]
+		frappe.db.set_value("POS Invoice", name, "status", "Credit Note Issued")
+		detail = self._get_sale(name)
+		self.assertTrue(detail["ok"])
+		self.assertEqual(detail["data"]["sale"]["summary"]["status"], "paid")
+
+	def test_return_creates_partial_refund_with_reason(self):
+		sale = self._two_item_sale()
+		frappe.db.set_value("POS Invoice", sale["summary"]["name"], "remarks", "Original remark")
+		self._allow_cash_returns()
+		result = self._return(self._return_payload(sale, qty="1", amount="-100"))
+		self.assertTrue(result["ok"])
+		invoice = frappe.get_doc("POS Invoice", result["data"]["sale"]["summary"]["name"])
+		self.assertTrue(invoice.is_return)
+		self.assertEqual(invoice.return_against, sale["summary"]["name"])
+		self.assertEqual(Decimal(str(invoice.items[0].qty)), Decimal("-1"))
+		self.assertEqual(Decimal(str(invoice.payments[0].amount)), Decimal("-100"))
+		self.assertEqual(invoice.remarks.count("Original remark"), 1)
+		self.assertEqual(invoice.remarks.count("Mobile POS Return Reason: Damaged"), 1)
+
+	def test_return_rejects_qty_beyond_core_remaining_quantity(self):
+		sale = self._two_item_sale()
+		self._allow_cash_returns()
+		self._return(self._return_payload(sale, qty="1", amount="-100"))
+		result = self._return(self._return_payload(sale, qty="2", amount="-200"))
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["code"], "INVALID_REQUEST")
+		self.assertEqual(result["error"]["details"]["field"], "items")
+
+	def test_return_rejects_disallowed_or_unsettled_refund_payments(self):
+		sale = self._submit()["data"]["sale"]
+		result = self._return(self._return_payload(sale, qty="1", amount="-100"))
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["code"], "INVALID_PAYMENT")
+		self._allow_cash_returns()
+		result = self._return(self._return_payload(sale, qty="1", amount="-99"))
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["code"], "INVALID_PAYMENT")
+
+	def test_return_replay_returns_same_reference(self):
+		sale = self._submit()["data"]["sale"]
+		self._allow_cash_returns()
+		payload = self._return_payload(sale, qty="1", amount="-100")
+		key = str(uuid4())
+		with patch("frappe.get_request_header", return_value=key):
+			first = self._return_endpoint(payload)
+			second = self._return_endpoint(payload)
+		self.assertTrue(first["ok"])
+		self.assertEqual(first["data"], second["data"])
+		self.assertFalse(first["meta"]["replayed"])
+		self.assertTrue(second["meta"]["replayed"])
+		self.assertEqual(
+			frappe.db.count("POS Invoice", {"custom_mobile_pos_transaction_id": key, "docstatus": 1}), 1
+		)
+
 	def _submit(self, **overrides):
 		with patch("frappe.get_request_header", return_value=str(uuid4())):
 			return self._endpoint(self._payload(**overrides))
+
+	def _two_item_sale(self):
+		return self._submit(
+			client_accepted_grand_total="200",
+			items=[{**self._payload()["items"][0], "qty": "2"}],
+			payments=[{"mode_of_payment": "Cash", "amount": "200", "reference_no": None}],
+		)["data"]["sale"]
+
+	def _history(self, **query):
+		return sales_api.list(**query)
+
+	def _get_sale(self, name):
+		return sales_api.get(name=name)
+
+	def _return(self, payload):
+		with patch("frappe.get_request_header", return_value=str(uuid4())):
+			return self._return_endpoint(payload)
+
+	def _return_endpoint(self, payload):
+		frappe.local.form_dict = frappe._dict(payload)
+		return sales_api.create_return()
+
+	def _return_payload(self, sale, *, qty, amount):
+		return {
+			"source_name": sale["summary"]["name"],
+			"reason": " Damaged ",
+			"items": [{"row_id": sale["items"][0]["row_id"], "qty": qty}],
+			"payments": [{"mode_of_payment": "Cash", "amount": amount, "reference_no": None}],
+		}
+
+	def _allow_cash_returns(self):
+		frappe.set_user("Administrator")
+		self.profile.reload()
+		for payment in self.profile.payments:
+			if payment.mode_of_payment == "Cash":
+				payment.allow_in_returns = 1
+		self.profile.save(ignore_permissions=True)
+		frappe.set_user(self.cashier)
 
 	def _endpoint(self, payload):
 		frappe.local.form_dict = frappe._dict(payload)
