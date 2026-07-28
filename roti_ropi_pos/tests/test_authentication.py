@@ -84,6 +84,9 @@ class TestAuthentication(IntegrationTestCase):
 				"/api/method/roti_ropi_pos.api.v1.sales.list",
 				"/api/method/roti_ropi_pos.api.v1.sales.get",
 				"/api/method/roti_ropi_pos.api.v1.sales.create_return",
+				"/api/method/roti_ropi_pos.api.v1.closing.preview",
+				"/api/method/roti_ropi_pos.api.v1.closing.submit",
+				"/api/method/roti_ropi_pos.api.v1.closing.status",
 			},
 		)
 
