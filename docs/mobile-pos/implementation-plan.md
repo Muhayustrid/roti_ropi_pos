@@ -1104,7 +1104,7 @@ Review the intended diff, report the proposed English commit message `feat: add 
 
 ### Task 9: Backend End-to-End Security, Upgrade, and Release Gate
 
-**Status:** **Backend local gate complete; staging evidence pending**
+**Status:** **Complete** ✅ (local and isolated staging gates passed 2026-07-29)
 
 **Files:**
 - Create: `roti_ropi_pos/tests/test_mobile_pos_flow.py`
@@ -1155,9 +1155,13 @@ Before Task 9 execution, verify every exact module path against the installed so
 
 Shared development-site history required approved cleanup of 897 committed test openings and reversible isolation of one operational opening plus 597 old unconsolidated invoices while core ERPNext tests ran. Restoration was verified: `POS-OPE-2026-00004` is Open, no `__TASK9_TEMP__` markers remain, and two `Outlet Training` invoices remain unconsolidated. This was local test-environment cleanup, not production migration.
 
-- [ ] **Step 4: Perform staging API smoke tests**
+- [x] **Step 4: Perform staging API smoke tests**
 
 Use a dedicated staging cashier and OAuth Authorization Code with PKCE S256. Record request IDs and ERPNext document names for bootstrap, customer search, open, scan, submit, replay, return, close, and status. Verify that a prior-day submitted/unclosed opening remains visible with `posting_date`, `period_start_date`, and `STALE_OPENING`. With developer mode disabled and active workers, close at least ten POS Invoice rows and record the real `queued` to `submitted` transition. Confirm the bearer token is denied from core method/resource routes and that no tokens, verifiers, authorization codes, or stack traces appear in logs.
+
+**Isolated staging evidence (2026-07-29):** `task9-staging.localhost` ran with developer mode disabled, tests disabled, scheduler enabled, and a live Redis worker. OAuth Authorization Code with PKCE S256 passed; valid bearer access to both core method and resource routes returned HTTP 403. Bootstrap exposed prior-day `POS-OPE-2026-00005` with `posting_date`, `period_start_date`, and `STALE_OPENING`, then API closing produced `POS-CLO-2026-00005`. Fresh opening `POS-OPE-2026-00006` completed customer search, bakery batch/UOM scan, authoritative quote, sale `ACC-PSINV-2026-00023`, same-key replay, history/detail, partial return `ACC-PSINV-2026-00024`, and queued closing `POS-CLO-2026-00006`; real worker polling observed `queued` then `submitted`. Sanitized evidence contains only request IDs, document names, and statuses; secret scan found no token, verifier, authorization code, password, client secret, or traceback.
+
+Staging exposed two release blockers before passing: queued consolidation inherited the cashier identity and lacked internal Sales Invoice permission, while synchronous core consolidation committed away generic idempotency savepoints. Queued consolidation now uses a scoped internal Administrator identity and always restores the cashier; closing requests now use the documented commit/reconciliation exception and clear recovery lease state at completion. Regression tests reproduce both failures outside test-only ERPNext behavior.
 
 - [x] **Step 5: Update implementation status in the documents**
 
