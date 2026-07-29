@@ -8,6 +8,7 @@ Read this file before changing this repository. These rules apply to the entire 
 - Write repository Markdown, code comments, technical documentation, test names, and commit messages in English.
 - Do not commit, push, deploy, migrate production, or begin a later implementation phase without explicit user approval.
 - Verify the installed Frappe and ERPNext source before relying on a core method, field, hook, permission, or side effect.
+- After a task or phase is confirmed complete (all tests pass, committed, pushed), update its **Status** line in `docs/mobile-pos/implementation-plan.md` to `**Complete** ✅ (<commit message> — commit <hash>)`. Do this in the same session before closing, no separate approval needed.
 
 ## Ownership and Boundaries
 

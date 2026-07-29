@@ -881,7 +881,7 @@ Review the intended diff, report the proposed English commit message `feat: add 
 
 ### Task 6: Idempotent Sale Submission
 
-**Status:** **Proposed**
+**Status:** **Complete** ✅ (`feat: submit idempotent mobile POS sales` — commit `d25ad12`)
 
 **Files:**
 - Create: `roti_ropi_pos/mobile_pos/invoices.py`
@@ -973,7 +973,7 @@ Review the intended diff, report the proposed English commit message `feat: subm
 
 ### Task 7: Sale History and Returns
 
-**Status:** **Proposed**
+**Status:** **Complete** ✅ (`feat: add mobile POS history and returns` — commit `428c2fa`)
 
 **Files:**
 - Modify: `roti_ropi_pos/mobile_pos/invoices.py`
@@ -1023,7 +1023,7 @@ Review the intended diff, report the proposed English commit message `feat: add 
 
 ### Task 8: Closing Preview, Submit, and Status
 
-**Status:** **Proposed**
+**Status:** **Complete** ✅ (`feat: add mobile POS closing workflow` — commit `640c17a`)
 
 **Files:**
 - Create: `roti_ropi_pos/mobile_pos/closing.py`
