@@ -3,16 +3,11 @@ from __future__ import annotations
 import frappe
 
 from roti_ropi_pos.api.v1.bootstrap import mobile_pos_endpoint
-from roti_ropi_pos.mobile_pos.authorization import get_authorized_profile
-from roti_ropi_pos.mobile_pos.closing import (
-	closing_status,
-	preview_closing,
-	submit_closing,
-)
+from roti_ropi_pos.mobile_pos.authorization import get_authorized_profile, require_doc_permission
+from roti_ropi_pos.mobile_pos.closing import closing_status, execute_closing_submit, preview_closing
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
-from roti_ropi_pos.mobile_pos.idempotency import execute_idempotent
 from roti_ropi_pos.mobile_pos.responses import success
-from roti_ropi_pos.mobile_pos.validation import require_json_object
+from roti_ropi_pos.mobile_pos.validation import decimal_string, require_json_object
 
 
 @frappe.whitelist(methods=["GET"])
@@ -34,11 +29,10 @@ def preview(pos_profile=None) -> dict:
 def submit(**kwargs) -> dict:
 	"""Submit one idempotent POS Closing Entry."""
 	payload = _parse_closing_payload(dict(frappe.form_dict))
-	return execute_idempotent(
-		"v1.closing.submit",
-		payload,
-		lambda transaction_id: submit_closing(payload, transaction_id),
-	)
+	profile = get_authorized_profile(payload["pos_profile"])
+	require_doc_permission("POS Closing Entry", "create")
+	require_doc_permission("POS Closing Entry", "submit")
+	return execute_closing_submit(profile, payload)
 
 
 @frappe.whitelist(methods=["GET"])
@@ -88,14 +82,8 @@ def _parse_closing_payload(value: dict) -> dict:
 				"mode_of_payment is invalid.",
 				details={"field": "mode_of_payment", "reason": "Expected a payment mode name."},
 			)
-		amount = row.get("closing_amount")
-		if not isinstance(amount, str) or not amount.strip():
-			raise MobilePOSAPIError(
-				"INVALID_REQUEST",
-				"closing_amount is invalid.",
-				details={"field": "closing_amount", "reason": "Expected a decimal string."},
-			)
-		parsed_balances.append({"mode_of_payment": mop.strip(), "closing_amount": amount.strip()})
+		amount = decimal_string(row.get("closing_amount"), field="closing_amount")
+		parsed_balances.append({"mode_of_payment": mop.strip(), "closing_amount": amount})
 	return {
 		"pos_profile": pos_profile.strip(),
 		"closing_balances": parsed_balances,

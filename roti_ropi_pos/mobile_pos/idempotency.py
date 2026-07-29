@@ -14,7 +14,7 @@ import frappe
 from frappe.utils import now_datetime
 
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
-from roti_ropi_pos.mobile_pos.responses import success
+from roti_ropi_pos.mobile_pos.responses import error_envelope, success
 
 _log = logging.getLogger(__name__)
 
@@ -169,11 +169,11 @@ def _resolve_committed_request(scope_key: str, request_hash: str, operation_id: 
 def replay_response(request) -> dict:
 	response = frappe.parse_json(request.response_json)
 	response.setdefault("meta", {})["replayed"] = True
-	frappe.response["http_status_code"] = 200
+	frappe.response["http_status_code"] = 200 if request.status == "Completed" else request.http_status
 	return response
 
 
-def _complete_request(
+def complete_request(
 	request,
 	response: dict,
 	*,
@@ -191,11 +191,33 @@ def _complete_request(
 	request.resolved_at = now
 	request.expires_at = now + timedelta(days=RETENTION_DAYS)
 	request.audit_reference_written = 1 if audit_reference_written else 0
+	request.lease_expires_at = None
+	request.phase = None
 	# The service has already verified the business reference in
 	# ``verify_business_reference``; the control record is the trusted writer and
 	# must not re-validate the dynamic link existence on each update.
 	request.flags.ignore_links = True
 	request.save(ignore_permissions=True)
+
+
+def reject_request(request, error: MobilePOSAPIError, *, reference_name: str) -> dict:
+	now = now_datetime()
+	request_id = frappe.generate_hash(length=26)
+	response = error_envelope(error, request_id, now.astimezone().isoformat())
+	request.status = "Rejected"
+	request.reference_doctype = "POS Closing Entry"
+	request.reference_name = reference_name
+	request.http_status = error.status
+	request.response_json = frappe.as_json(response)
+	request.resolved_at = now
+	request.expires_at = now + timedelta(days=RETENTION_DAYS)
+	request.audit_reference_written = 1
+	request.lease_expires_at = None
+	request.phase = None
+	request.flags.ignore_links = True
+	request.save(ignore_permissions=True)
+	frappe.response["http_status_code"] = error.status
+	return response
 
 
 def verify_business_reference(operation_id: str, result: MutationResult, key: str) -> None:
@@ -261,7 +283,7 @@ def execute_idempotent(
 		result = operation(key)
 		verify_business_reference(operation_id, result, key)
 		response = success(result.data, http_status=result.http_status)
-		_complete_request(
+		complete_request(
 			request,
 			response,
 			reference_doctype=result.reference_doctype,

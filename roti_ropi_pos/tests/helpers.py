@@ -168,6 +168,20 @@ def clear_mobile_pos_request_table() -> None:
 	frappe.db.delete("Mobile POS Request")
 
 
+def close_test_openings(*users: str) -> None:
+	"""Close committed openings owned by current test users."""
+	if not users:
+		return
+	frappe.db.rollback()
+	for name in frappe.get_all(
+		"POS Opening Entry",
+		filters={"user": ["in", users], "status": "Open"},
+		pluck="name",
+	):
+		frappe.db.set_value("POS Opening Entry", name, "status", "Closed", update_modified=False)
+	frappe.db.commit()
+
+
 def make_customer_group(group_name: str, *, parent_customer_group: str = "All Customer Groups") -> str:
 	"""Insert a leaf Customer Group for closure tests."""
 	if frappe.db.exists("Customer Group", group_name):
