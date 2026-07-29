@@ -100,7 +100,17 @@ def _lock_stock(items: list[dict], warehouse: str) -> None:
 def _parse_sale_payload(value) -> dict:
 	value.pop("cmd", None)
 	payload = require_json_object(value, field="payload")
-	_unknown(payload, {"pos_profile", "customer", "walk_in_customer_name", "client_accepted_grand_total", "items", "payments"})
+	_unknown(
+		payload,
+		{
+			"pos_profile",
+			"customer",
+			"walk_in_customer_name",
+			"client_accepted_grand_total",
+			"items",
+			"payments",
+		},
+	)
 	return {
 		"pos_profile": _name(payload.get("pos_profile"), "pos_profile", "Expected a POS Profile name."),
 		"customer": _optional_name(payload.get("customer"), "customer", "Expected a Customer name or null."),
@@ -129,15 +139,19 @@ def _parse_return_payload(value) -> dict:
 	for row in items:
 		if not isinstance(row, dict):
 			raise _invalid("items", "Each row must be an object.")
-		_unknown(row, {"row_id", "qty"})
+		_unknown(row, {"source_item_row", "qty"})
 		parsed_items.append(
 			{
-				"row_id": _name(row.get("row_id"), "row_id", "Expected a POS Invoice Item row ID."),
+				"source_item_row": _name(
+					row.get("source_item_row"),
+					"source_item_row",
+					"Expected a POS Invoice Item row ID.",
+				),
 				"qty": _positive_decimal(row.get("qty"), "qty"),
 			}
 		)
-	if len({row["row_id"] for row in parsed_items}) != len(parsed_items):
-		raise _invalid("items", "Duplicate row_id values are not accepted.")
+	if len({row["source_item_row"] for row in parsed_items}) != len(parsed_items):
+		raise _invalid("items", "Duplicate source_item_row values are not accepted.")
 	return {
 		"source_name": _name(payload.get("source_name"), "source_name", "Expected a POS Invoice name."),
 		"reason": reason,

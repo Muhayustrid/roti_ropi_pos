@@ -372,7 +372,9 @@ class TestSaleSubmit(IntegrationTestCase):
 		self._allow_cash_returns()
 		result = self._return(self._return_payload(sale, qty="1", amount="-100"))
 		self.assertTrue(result["ok"])
-		invoice = frappe.get_doc("POS Invoice", result["data"]["sale"]["summary"]["name"])
+		self.assertIn("return_sale", result["data"])
+		self.assertNotIn("sale", result["data"])
+		invoice = frappe.get_doc("POS Invoice", result["data"]["return_sale"]["summary"]["name"])
 		self.assertEqual(Decimal(str(invoice.payments[0].amount)), Decimal("-100"))
 		result = self._return(self._return_payload(sale, qty="1", amount="100"))
 		self.assertFalse(result["ok"])
@@ -392,7 +394,7 @@ class TestSaleSubmit(IntegrationTestCase):
 		self._allow_cash_returns()
 		result = self._return(self._return_payload(sale, qty="1", amount="-100"))
 		self.assertTrue(result["ok"])
-		invoice = frappe.get_doc("POS Invoice", result["data"]["sale"]["summary"]["name"])
+		invoice = frappe.get_doc("POS Invoice", result["data"]["return_sale"]["summary"]["name"])
 		self.assertTrue(invoice.is_return)
 		self.assertEqual(invoice.return_against, sale["summary"]["name"])
 		self.assertEqual(Decimal(str(invoice.items[0].qty)), Decimal("-1"))
@@ -406,8 +408,15 @@ class TestSaleSubmit(IntegrationTestCase):
 		self._return(self._return_payload(sale, qty="1", amount="-100"))
 		result = self._return(self._return_payload(sale, qty="2", amount="-200"))
 		self.assertFalse(result["ok"])
-		self.assertEqual(result["error"]["code"], "INVALID_REQUEST")
-		self.assertEqual(result["error"]["details"]["field"], "items")
+		self.assertEqual(result["error"]["code"], "RETURN_LIMIT_EXCEEDED")
+		self.assertEqual(
+			result["error"]["details"],
+			{
+				"source_item_row": sale["items"][0]["row_id"],
+				"requested_qty": "2",
+				"remaining_qty": "1.0",
+			},
+		)
 
 	def test_return_rejects_disallowed_or_unsettled_refund_payments(self):
 		sale = self._submit()["data"]["sale"]
@@ -464,7 +473,7 @@ class TestSaleSubmit(IntegrationTestCase):
 		return {
 			"source_name": sale["summary"]["name"],
 			"reason": " Damaged ",
-			"items": [{"row_id": sale["items"][0]["row_id"], "qty": qty}],
+			"items": [{"source_item_row": sale["items"][0]["row_id"], "qty": qty}],
 			"payments": [{"mode_of_payment": "Cash", "amount": amount, "reference_no": None}],
 		}
 

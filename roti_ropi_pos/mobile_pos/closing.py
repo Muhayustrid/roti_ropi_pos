@@ -168,7 +168,12 @@ def _create_closing_draft(profile, payload: dict, transaction_id: str):
 	_lock_opening(opening.name)
 	opening = frappe.get_doc("POS Opening Entry", opening.name)
 	if opening.status != "Open" or opening.docstatus != 1 or opening.pos_closing_entry:
-		raise MobilePOSAPIError("NO_ACTIVE_SESSION", "No open session for this profile.")
+		raise MobilePOSAPIError(
+			"NO_OPEN_SESSION",
+			"No open POS session is available for this profile.",
+			status=422,
+			details={"pos_profile": profile.name},
+		)
 	invoices = _eligible_invoices(opening)
 	balances = _normalize_closing_balances(profile, payload["closing_balances"], opening)
 	closing = frappe.get_doc(
@@ -210,6 +215,7 @@ def _complete_from_persisted(scope_key: str) -> dict:
 			"Closing is still being processed.",
 			status=409,
 			retryable=True,
+			details={"endpoint": _OPERATION, "retry_after_seconds": 1},
 		)
 	if closing.custom_mobile_pos_transaction_id != request.idempotency_key:
 		raise MobilePOSAPIError("IDEMPOTENCY_INVARIANT", "Closing reference mismatch.", status=500)
@@ -290,7 +296,12 @@ def closing_dto(doc) -> dict:
 def _require_opening(profile):
 	opening = get_current_opening(profile)
 	if not opening:
-		raise MobilePOSAPIError("NO_ACTIVE_SESSION", "No open session for this profile.")
+		raise MobilePOSAPIError(
+			"NO_OPEN_SESSION",
+			"No open POS session is available for this profile.",
+			status=422,
+			details={"pos_profile": profile.name},
+		)
 	return opening
 
 

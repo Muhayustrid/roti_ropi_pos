@@ -137,7 +137,8 @@ class TestClosingPreview(IntegrationTestCase):
 		frappe.set_user(self.cashier)
 		result = closing_api.preview(pos_profile=self.profile.name)
 		self.assertFalse(result["ok"])
-		self.assertEqual(result["error"]["code"], "NO_ACTIVE_SESSION")
+		self.assertEqual(result["error"]["code"], "NO_OPEN_SESSION")
+		self.assertEqual(result["error"]["details"], {"pos_profile": self.profile.name})
 
 	def test_preview_requires_pos_profile(self):
 		result = closing_api.preview(pos_profile=None)
@@ -247,6 +248,10 @@ class TestClosingPreview(IntegrationTestCase):
 		self.assertFalse(result["ok"])
 		self.assertEqual(result["error"]["code"], "REQUEST_IN_PROGRESS")
 		self.assertTrue(result["error"]["retryable"])
+		self.assertEqual(
+			result["error"]["details"],
+			{"endpoint": "v1.closing.submit", "retry_after_seconds": 1},
+		)
 
 	def test_expired_draft_request_resumes_same_closing(self):
 		from roti_ropi_pos.mobile_pos.closing import _create_closing_draft
@@ -324,7 +329,7 @@ class TestClosingPreview(IntegrationTestCase):
 		frappe.set_user(plain_user)
 		result = self._close(str(uuid4()))
 		self.assertFalse(result["ok"])
-		self.assertIn(result["error"]["code"], {"PERMISSION_ERROR", "NO_ACTIVE_SESSION", "PERMISSION_DENIED"})
+		self.assertIn(result["error"]["code"], {"PERMISSION_ERROR", "NO_OPEN_SESSION", "PERMISSION_DENIED"})
 
 	# ── submit (queued path: >= 10 invoices) ────────────────────────────
 

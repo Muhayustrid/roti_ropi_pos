@@ -1104,7 +1104,7 @@ Review the intended diff, report the proposed English commit message `feat: add 
 
 ### Task 9: Backend End-to-End Security, Upgrade, and Release Gate
 
-**Status:** **Complete** ✅ (local and isolated staging gates passed 2026-07-29)
+**Status:** **Complete** ✅ (local and isolated staging gates passed 2026-07-29; fresh 186-test gate and final v1 contract alignment passed 2026-07-29)
 
 **Files:**
 - Create: `roti_ropi_pos/tests/test_mobile_pos_flow.py`

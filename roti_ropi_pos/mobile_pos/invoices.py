@@ -97,7 +97,10 @@ def list_sales(profile, *, status: str, q: str, start: int, limit: int) -> dict:
 		page_length=limit + 1,
 	)
 	has_more = len(docs) > limit
-	return {"sales": [sale_summary(doc) for doc in docs[:limit]], "page": {"start": start, "limit": limit, "has_more": has_more}}
+	return {
+		"sales": [sale_summary(doc) for doc in docs[:limit]],
+		"page": {"start": start, "limit": limit, "has_more": has_more},
+	}
 
 
 def get_sale(name: str) -> dict:
@@ -121,15 +124,25 @@ def create_return(payload: dict, transaction_id: str) -> MutationResult:
 	from erpnext.accounts.doctype.pos_invoice.pos_invoice import make_sales_return
 
 	return_invoice = make_sales_return(source.name)
-	requested = {row["row_id"]: row["qty"] for row in payload["items"]}
+	requested = {row["source_item_row"]: row["qty"] for row in payload["items"]}
 	rows = {row.pos_invoice_item: row for row in return_invoice.items}
 	if set(requested) - set(rows):
-		raise _invalid_request("items", "Each row_id must be returnable from this sale.")
+		raise _invalid_request("items", "Each source_item_row must be returnable from this sale.")
 	return_invoice.set("items", [])
-	for row_id, qty in requested.items():
-		row = rows[row_id]
-		if qty > abs(Decimal(str(row.qty))):
-			raise _invalid_request("items", "Requested quantity exceeds the remaining returnable quantity.")
+	for source_item_row, qty in requested.items():
+		row = rows[source_item_row]
+		remaining_qty = abs(Decimal(str(row.qty)))
+		if qty > remaining_qty:
+			raise MobilePOSAPIError(
+				"RETURN_LIMIT_EXCEEDED",
+				"The requested return quantity exceeds the source sale.",
+				status=422,
+				details={
+					"source_item_row": source_item_row,
+					"requested_qty": _decimal(qty),
+					"remaining_qty": _decimal(remaining_qty),
+				},
+			)
 		row.qty = -float(qty)
 		return_invoice.append("items", row)
 	return_invoice.set("payments", [])
@@ -173,7 +186,7 @@ def create_return(payload: dict, transaction_id: str) -> MutationResult:
 	return_invoice.insert()
 	return_invoice.submit()
 	return MutationResult(
-		data={"sale": sale_detail(return_invoice)},
+		data={"return_sale": sale_detail(return_invoice)},
 		reference_doctype="POS Invoice",
 		reference_name=return_invoice.name,
 	)
@@ -252,10 +265,16 @@ def _validate_total_stock(profile, items: list[dict]) -> None:
 		)
 		if components:
 			for component in components:
-				component_qty = stock_qty * Decimal(str(component.qty)) * Decimal(
-					str(get_conversion_factor(component.item_code, component.uom)["conversion_factor"])
+				component_qty = (
+					stock_qty
+					* Decimal(str(component.qty))
+					* Decimal(
+						str(get_conversion_factor(component.item_code, component.uom)["conversion_factor"])
+					)
 				)
-				requested[component.item_code] = requested.get(component.item_code, Decimal(0)) + component_qty
+				requested[component.item_code] = (
+					requested.get(component.item_code, Decimal(0)) + component_qty
+				)
 		else:
 			requested[row["item_code"]] = requested.get(row["item_code"], Decimal(0)) + stock_qty
 	for item_code, requested_qty in requested.items():
@@ -332,9 +351,7 @@ def _append_items(invoice, profile, customer: str, items: list[dict]) -> None:
 				raise _invalid_serial(row, "not_available", serial_no=invalid)
 			if Decimal(len(row["serial_numbers"])) != row["qty"] * Decimal(quoted["conversion_factor"]):
 				raise _invalid_serial(row, "quantity_mismatch")
-		available, is_stock_item, allow_negative = get_stock_availability(
-			row["item_code"], profile.warehouse
-		)
+		available, is_stock_item, allow_negative = get_stock_availability(row["item_code"], profile.warehouse)
 		requested = row["qty"] * Decimal(quoted["conversion_factor"])
 		if is_stock_item and not allow_negative and Decimal(str(available)) < requested:
 			raise MobilePOSAPIError(
