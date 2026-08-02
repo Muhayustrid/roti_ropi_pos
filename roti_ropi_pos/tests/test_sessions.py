@@ -81,6 +81,8 @@ class TestSessions(IntegrationTestCase):
 		self.assertEqual(opening.company, COMPANY)
 		self.assertEqual(opening.pos_profile, self.profile.name)
 		self.assertEqual(opening.custom_mobile_pos_transaction_id, self.idempotency_key)
+		self.assertEqual(Decimal(str(opening.balance_details[0].opening_amount)), Decimal("500000.00"))
+		self.assertEqual(result.data["opening_session"]["opening_balances"][0]["opening_amount"], "500000.00")
 		self.assertEqual(result.data["opening_session"]["name"], opening.name)
 
 	def test_open_session_rejects_mode_outside_profile(self):

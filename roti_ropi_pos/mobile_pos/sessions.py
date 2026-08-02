@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import frappe
@@ -8,6 +9,8 @@ from frappe.utils import get_datetime, get_system_timezone, getdate, now_datetim
 from roti_ropi_pos.mobile_pos.authorization import require_doc_permission
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.mobile_pos.idempotency import MutationResult
+from roti_ropi_pos.mobile_pos.profiles import profile_opening_config
+from roti_ropi_pos.mobile_pos.validation import opening_amount_string
 
 
 def get_current_opening(profile):
@@ -43,7 +46,7 @@ def open_session(profile, balances: list[dict], transaction_id: str) -> Mutation
 	require_doc_permission("POS Opening Entry", "submit")
 	_lock_opening_scope(profile)
 	_check_opening_conflicts(profile)
-	normalized_balances = _normalize_balances(profile, balances)
+	normalized_balances = normalize_opening_balances(profile, balances)
 
 	opening = frappe.get_doc(
 		{
@@ -102,8 +105,9 @@ def _raise_session_already_open(conflict) -> None:
 	)
 
 
-def _normalize_balances(profile, balances: list[dict]) -> list[dict]:
-	allowed_modes = {row.mode_of_payment for row in profile.payments}
+def normalize_opening_balances(profile, balances: list[dict]) -> list[dict]:
+	config = profile_opening_config(profile)
+	allowed_modes = {row["mode_of_payment"] for row in config["opening_payment_modes"]}
 	seen = set()
 	normalized = []
 	for row in balances:
@@ -121,7 +125,19 @@ def _normalize_balances(profile, balances: list[dict]) -> list[dict]:
 				details={"field": "opening_balances", "reason": "Duplicate payment mode."},
 			)
 		seen.add(mode)
-		normalized.append({"mode_of_payment": mode, "opening_amount": row["opening_amount"]})
+		normalized.append(
+			{
+				"mode_of_payment": mode,
+				"opening_amount": opening_amount_string(
+					format(row["opening_amount"], "f")
+					if isinstance(row["opening_amount"], Decimal)
+					else row["opening_amount"],
+					field="amount",
+					decimal_places=config["decimal_places"],
+					column_type=config["column_type"],
+				),
+			}
+		)
 	if not normalized:
 		raise MobilePOSAPIError(
 			"INVALID_REQUEST",
@@ -129,6 +145,10 @@ def _normalize_balances(profile, balances: list[dict]) -> list[dict]:
 			details={"field": "opening_balances", "reason": "Expected at least one balance."},
 		)
 	return normalized
+
+
+def _normalize_balances(profile, balances: list[dict]) -> list[dict]:
+	return normalize_opening_balances(profile, balances)
 
 
 def opening_dto(doc) -> dict:

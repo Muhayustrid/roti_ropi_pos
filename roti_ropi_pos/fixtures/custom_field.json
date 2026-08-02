@@ -1,5 +1,17 @@
 [
  {
+  "doctype": "Custom Field",
+  "dt": "POS Payment Method",
+  "fieldname": "custom_mobile_pos_suggested_opening_amount",
+  "fieldtype": "Data",
+  "label": "Suggested Mobile POS Opening Amount",
+  "description": "Canonical non-negative decimal string used as the mobile POS opening default.",
+  "read_only": 0,
+  "insert_after": "mode_of_payment",
+  "name": "POS Payment Method-custom_mobile_pos_suggested_opening_amount",
+  "module": "Roti Ropi Pos"
+ },
+ {
   "alignment": "",
   "allow_in_quick_entry": 0,
   "allow_on_submit": 0,

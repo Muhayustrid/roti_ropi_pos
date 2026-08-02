@@ -190,7 +190,16 @@ override_doctype_class = {
 # Read-only audit custom fields persisted on POS business documents so
 # transaction id correlation survives deletion of Mobile POS Request rows.
 fixtures = [
-	{"dt": "Custom Field", "filters": [["fieldname", "in", ["custom_mobile_pos_transaction_id"]]]},
+	{
+		"dt": "Custom Field",
+		"filters": [
+			[
+				"fieldname",
+				"in",
+				["custom_mobile_pos_transaction_id", "custom_mobile_pos_suggested_opening_amount"],
+			]
+		],
+	},
 	{"dt": "Role", "filters": [["role_name", "=", "Mobile POS Cashier"]]},
 	{
 		"dt": "Custom DocPerm",
