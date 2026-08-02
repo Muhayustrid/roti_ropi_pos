@@ -8,7 +8,7 @@ from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.mobile_pos.idempotency import execute_idempotent
 from roti_ropi_pos.mobile_pos.responses import success
 from roti_ropi_pos.mobile_pos.sessions import get_current_opening, open_session, opening_dto
-from roti_ropi_pos.mobile_pos.validation import decimal_string, require_json_object
+from roti_ropi_pos.mobile_pos.validation import require_json_object
 
 
 @frappe.whitelist(methods=["GET"])
@@ -63,7 +63,7 @@ def _parse_open_payload(value) -> dict:
 		normalized.append(
 			{
 				"mode_of_payment": mode,
-				"opening_amount": decimal_string(row.get("amount"), field="amount"),
+				"opening_amount": row.get("amount"),
 			}
 		)
 	return {"pos_profile": pos_profile, "opening_balances": normalized}

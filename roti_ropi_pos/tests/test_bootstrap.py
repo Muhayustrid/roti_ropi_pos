@@ -56,6 +56,8 @@ class TestBootstrap(IntegrationTestCase):
 				"customer",
 				"allow_partial_payment",
 				"invoice_mode",
+				"opening_payment_modes",
+				"opening_amount_policy",
 			},
 		)
 

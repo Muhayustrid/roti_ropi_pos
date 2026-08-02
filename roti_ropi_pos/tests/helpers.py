@@ -50,6 +50,7 @@ def make_pos_profile(
 			"currency": currency,
 			"selling_price_list": selling_price_list or "Standard Selling",
 			"disabled": disabled,
+			"payments": [{"mode_of_payment": "Cash", "default": 1}],
 			"applicable_for_users": [{"user": user}],
 		}
 	)
