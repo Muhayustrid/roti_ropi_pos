@@ -146,9 +146,31 @@
   "selling_price_list": "PG-Outlet 01",
   "customer": "Walk In Customer",
   "allow_partial_payment": false,
-  "invoice_mode": "POS Invoice"
+  "invoice_mode": "POS Invoice",
+  "opening_payment_modes": [
+    {
+      "mode_of_payment": "Cash",
+      "suggested_opening_amount": "200000.00",
+      "amount_editable": true
+    }
+  ],
+  "opening_amount_policy": {
+    "currency": "IDR",
+    "decimal_places": 2,
+    "minimum": "0.00",
+    "api_syntax": "ascii_decimal_dot",
+    "rounding": "reject",
+    "policy_version": "opening-amount/v1"
+  }
 }
 ```
+
+- **Verified**: `opening_payment_modes` is a server-owned projection of the selected POS Profile payment rows. The server preserves profile row order; clients use this projection for allowed mode names and display order rather than inventing or reordering modes.
+- **Verified**: `suggested_opening_amount`, `opening_amount_policy.minimum`, request `opening_balances[].amount`, and returned opening amounts are exact decimal strings, never JSON numbers.
+- **Verified**: `api_syntax: "ascii_decimal_dot"` accepts only non-negative ASCII digits with an optional decimal point and fractional digits: `[0-9]+(?:\.[0-9]+)?`. Locale separators, signs, exponents, and surrounding whitespace are invalid.
+- **Verified**: `decimal_places` is the server-provided currency scale. Clients must not send more fractional digits than this scale; excess fractional digits are rejected without rounding or truncation.
+- **Verified**: `minimum` is server-provided and is the v1 business minimum. V1 defines no business maximum and exposes no total-precision field. Storage-capacity overflow remains a backend-authoritative validation against the runtime database column.
+- **Verified**: `Cash`, `IDR`, and `200000.00` above are examples only; clients must use values returned for the selected profile.
 
 ### Opening Session
 
@@ -162,7 +184,7 @@
   "posting_date": "2026-07-23",
   "period_start_date": "2026-07-23T08:00:00+07:00",
   "opening_balances": [
-    {"mode_of_payment": "Cash", "opening_amount": "500000"}
+    {"mode_of_payment": "Cash", "opening_amount": "500000.00"}
   ],
   "warnings": []
 }
@@ -303,13 +325,15 @@
 {
   "pos_profile": "OUTLET-01",
   "opening_balances": [
-    {"mode_of_payment": "Cash", "amount": "500000"},
-    {"mode_of_payment": "Card", "amount": "0"}
+    {"mode_of_payment": "Cash", "amount": "500000.00"},
+    {"mode_of_payment": "Card", "amount": "0.00"}
   ]
 }
 ```
 
-- **Proposed**: Reject unknown or duplicate payment modes and derive company/user from the profile and session.
+- **Verified**: Every `mode_of_payment` must come from the selected profile's server-provided `opening_payment_modes`; unknown and duplicate modes are rejected. The server derives company and user from the authorized profile and authenticated session.
+- **Verified**: Every `amount` follows the selected profile's `opening_amount_policy`: exact decimal string, `ascii_decimal_dot` syntax, value at least the server-provided `minimum`, and no more fractional digits than `decimal_places`. Excess fractional digits are rejected without rounding or truncation.
+- **Verified**: V1 has no business maximum. The backend remains authoritative for storage-capacity overflow; clients receive no total-precision field and must not infer one.
 - **Proposed**: Returns `{ "opening_session": OpeningSession }`. The endpoint sets `frappe.response.http_status_code` to 201 on first execution and 200 on replay.
 
 ### `GET customers.search`
