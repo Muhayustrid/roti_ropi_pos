@@ -128,9 +128,9 @@
 | `PRICE_CHANGED` | `accepted_grand_total: decimal string`, `authoritative_grand_total: decimal string`, `currency: string`, `items: SaleItem[]`, `taxes: SaleTax[]` |
 | `INSUFFICIENT_STOCK` | `item_code: string`, `warehouse: string`, `requested_qty: decimal string`, `available_qty: decimal string` |
 | `INVALID_BATCH` | `item_code: string`, `batch_no: string`, `reason: string` |
-| `INVALID_SERIAL_NUMBER` | `item_code: string`, `serial_no: string`, `reason: string` |
-| `INVALID_PAYMENT` | `mode_of_payment: string or null`, `reason: string` |
-| `RETURN_LIMIT_EXCEEDED` | `source_item_row: string`, `requested_qty: decimal string`, `remaining_qty: decimal string` |
+| `INVALID_SERIAL_NUMBER` | `item_code: string`, `serial_no: string or null`, `reason: string` |
+| `INVALID_PAYMENT` | `mode_of_payment: string or null`, `reason: string`; invalid return modes also include `allowed_refund_modes: string[]` |
+| `RETURN_LIMIT_EXCEEDED` | `source_name: string`, `source_item_row: string`, `requested_qty: decimal string`, `remaining_qty: decimal string`, `refresh_endpoint: "v1.sales.get"` |
 | `PROFILE_CONFIGURATION_INVALID` | `pos_profile: string`, `field: string`, `reason: string` |
 | `TEMPORARILY_UNAVAILABLE` | `retry_after_seconds: integer` |
 
@@ -223,6 +223,10 @@
   "grand_total": "55000",
   "paid_amount": "55000",
   "change_amount": "0",
+  "rounded_total": "55000",
+  "outstanding_amount": "0",
+  "discount_amount": "0",
+  "total_taxes_and_charges": "5000",
   "posting_date": "2026-07-23",
   "posting_time": "14:25:00"
 }
@@ -256,7 +260,19 @@
       "rate": "25000",
       "amount": "50000",
       "batch_no": "BATCH-QR-0001",
-      "serial_numbers": []
+      "serial_numbers": [],
+      "returnability": {
+        "original_row_id": "8f1a2b3c4d",
+        "item_code": "CROISSANT-PACK",
+        "original_qty": "2",
+        "returned_qty": "0",
+        "remaining_qty": "2",
+        "uom": "Pack",
+        "batch_numbers": ["BATCH-QR-0001"],
+        "serial_numbers": [],
+        "eligible": true,
+        "rejection_reason": null
+      }
     }
   ],
   "taxes": [
@@ -264,7 +280,19 @@
   ],
   "payments": [
     {"mode_of_payment": "Cash", "amount": "55000", "reference_no": null}
-  ]
+  ],
+  "return_contract": {
+    "quantity_policy": {
+      "decimal_places": 3,
+      "minimum": "0.001",
+      "maximum": "999999999999.999",
+      "api_syntax": "ascii_decimal_dot",
+      "rounding": "reject",
+      "policy_version": "return-quantity/v1"
+    },
+    "allowed_refund_modes": [{"mode_of_payment": "Cash"}],
+    "refund_mode_required": false
+  }
 }
 ```
 
@@ -274,7 +302,7 @@
 ## Endpoints
 
 - **Approved**: The endpoint inventory below is the complete approved v1 surface.
-- **Approved**: V1 has no health endpoint and no return-preview endpoint. Either addition requires explicit approval as a new backend contract and task.
+- **Approved**: V1 has no health endpoint. Task 10 explicitly adds the read-only `sales.quote_return` endpoint.
 
 ### `GET bootstrap.get`
 
@@ -619,12 +647,14 @@
 ### `GET sales.get`
 
 - **Approved**: Query: `name` (required). V1 reads POS Invoice only.
-- **Proposed**: Returns `{ "sale": SaleDetail }` for a sale visible within the user's profile scope.
+- **Approved**: Returns `{ "sale": SaleDetail }` only when the document owner, authorized POS Profile, and Company match the cashier scope.
+- **Approved**: Every original row includes a fresh `returnability` projection. `returned_qty` sums only submitted POS Invoice returns linked by `return_against` and `pos_invoice_item`; Android never derives remaining quantity from cached history.
+- **Approved**: Direct and Serial and Batch Bundle references are projected as sanitized batch/serial arrays. A fully returned row reports `RETURN_LIMIT_REACHED`; a draft, cancelled, or return source reports `SOURCE_NOT_RETURNABLE`.
 
 ### `GET sales.list`
 
-- **Proposed**: Query: `pos_profile` (required), `status` (required), `q` (optional), `start` (default `0`), `limit` (default `20`, maximum `100`).
-- **Proposed**: Accepted list filters are `all`, `paid`, `return`, `consolidated`, and `cancelled`; the facade maps them to explicit core filters.
+- **Approved**: Query: `pos_profile` (required), `status` (required), `q` (optional), `start` (default `0`), `limit` (default `20`, maximum `100`).
+- **Approved**: Accepted list filters are `all`, `paid`, `return`, `consolidated`, and `cancelled`; results are permission-aware and scoped to cashier owner, authorized POS Profile, and Company.
 - **Approved**: Includes POS Invoice summaries only and preserves bakery's `custom_walk_in_customer_name` as `walk_in_customer_name`.
 
 ```json
@@ -648,6 +678,20 @@
 }
 ```
 
+### `POST sales.quote_return`
+
+```json
+{
+  "source_name": "ACC-PSINV-2026-00001",
+  "items": [{"source_item_row": "row-id-1", "qty": "1"}]
+}
+```
+
+- **Approved**: This read-only endpoint has no idempotency key and creates no POS Invoice or Mobile POS Request. It requires a current opening and the same permissions as creation.
+- **Approved**: It maps the selected original rows through ERPNext and returns authoritative item rates/amounts, taxes, discounts, `grand_total`, `rounded_total`, positive `refund_amount`, `selected_refund_mode`, and negative `refund_allocations`.
+- **Approved**: A valid refund mode is enabled, marked `allow_in_returns` on the source POS Profile, and has a default Mode of Payment Account for the profile Company. With one valid mode, the server selects it and Android omits `refund_mode`. With multiple modes, Android sends exactly one value from `allowed_refund_modes`; missing selection is `INVALID_REQUEST`, and a disallowed selection is `INVALID_PAYMENT` with reason `refund_mode_not_allowed`.
+- **Approved**: With no valid mode, the endpoint returns `PROFILE_CONFIGURATION_INVALID` with reason `no_valid_refund_mode` and creates no artifact.
+
 ### `POST sales.create_return`
 
 ```json
@@ -656,20 +700,22 @@
   "items": [
     {"source_item_row": "row-id-1", "qty": "1"}
   ],
-  "payments": [
-    {"mode_of_payment": "Cash", "amount": "-30000"}
-  ],
   "reason": "Customer returned one pack"
 }
 ```
 
 - **Approved**: The source is always POS Invoice in v1. Direct Sales Invoice mode and Sales Invoice returns are outside MVP scope.
-- **Proposed**: Build from ERPNext's POS Invoice return mapper, apply requested negative quantities, recalculate, and submit.
+- **Approved**: Android sends only the source, unique original row IDs, positive requested quantities, required reason, and conditional `refund_mode`. Refund amount, payments, accounts, rates, taxes, discounts, rounding, and accounting allocation are rejected as unsupported client fields.
+- **Approved**: The backend locks the original POS Invoice, recomputes cumulative submitted returns, maps through ERPNext, calculates all accounting values, selects/validates the refund mode, creates exactly one negative payment allocation, and submits the normal return POS Invoice.
+- **Approved**: Over-limit and concurrent losing attempts return `RETURN_LIMIT_EXCEEDED` with the current remaining quantity and `refresh_endpoint`; rejected requests create neither business nor idempotency artifacts.
+- **Approved**: Serialized rows must return the full currently remaining quantity because Android does not select physical serials. Partial serialized returns fail with `INVALID_SERIAL_NUMBER` and reason `partial_serial_return_not_supported`; batch rows may be partial.
 - **Approved**: Trim and validate a non-empty `reason`.
 - **Approved**: Append `Mobile POS Return Reason: <reason>` to standard `POS Invoice.remarks`.
 - **Approved**: Preserve existing remarks and insert exactly one newline before the appended content when existing remarks are non-empty.
-- **Proposed**: Return `{ "return_sale": SaleDetail }`; first execution sets HTTP 201 and replay sets HTTP 200.
-- **Approved**: V1 does not expose a separate return-preview endpoint.
+- **Approved**: Return `{ "return_sale": SaleDetail }` with `return_against`, `return_reason`, receipt totals, taxes, items, bundle-aware `batch_numbers`/`serial_numbers`, `refund_amount`, and persisted `refund_allocations`; first execution sets HTTP 201 and replay sets HTTP 200.
+- **Approved**: Replay requires the same UUID and identical normalized request, including conditional `refund_mode`, and returns the same POS Invoice reference. A different body with the same UUID returns `IDEMPOTENCY_KEY_REUSED`.
+
+Return quantity uses `return-quantity/v1`: an ASCII decimal-dot string, positive and non-zero, scale `0..min(max(float_precision, 0), 9)`, minimum one unit at that scale, maximum 12 integer digits plus that scale, and exact `Decimal` comparison. Leading/trailing whitespace, grouping, sign characters, exponent notation, malformed values, excessive scale, overflow, rounding, and truncation are rejected. Android sends no refund amount, so there is no return-refund input decimal policy.
 
 - **Approved**: V1 exposes no `sales.cancel` endpoint to Android. Cashier corrections use `sales.create_return`; manager cancellation remains an ERPNext Desk operation and may be designed separately after MVP.
 

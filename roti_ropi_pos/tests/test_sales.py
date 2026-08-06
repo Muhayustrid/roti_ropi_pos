@@ -367,18 +367,14 @@ class TestSaleSubmit(IntegrationTestCase):
 		self.assertFalse(result["ok"])
 		self.assertEqual(result["error"]["details"]["field"], "limit")
 
-	def test_return_parser_accepts_negative_payment_and_rejects_positive_payment(self):
+	def test_return_parser_rejects_client_refund_payments(self):
 		sale = self._submit()["data"]["sale"]
 		self._allow_cash_returns()
-		result = self._return(self._return_payload(sale, qty="1", amount="-100"))
-		self.assertTrue(result["ok"])
-		self.assertIn("return_sale", result["data"])
-		self.assertNotIn("sale", result["data"])
-		invoice = frappe.get_doc("POS Invoice", result["data"]["return_sale"]["summary"]["name"])
-		self.assertEqual(Decimal(str(invoice.payments[0].amount)), Decimal("-100"))
-		result = self._return(self._return_payload(sale, qty="1", amount="100"))
+		payload = self._return_payload(sale, qty="1")
+		payload["payments"] = [{"mode_of_payment": "Cash", "amount": "-100"}]
+		result = self._return(payload)
 		self.assertFalse(result["ok"])
-		self.assertEqual(result["error"]["details"]["field"], "amount")
+		self.assertEqual(result["error"]["details"]["field"], "payments")
 
 	def test_sale_detail_maps_credit_note_issued_to_paid(self):
 		result = self._submit()
@@ -392,7 +388,7 @@ class TestSaleSubmit(IntegrationTestCase):
 		sale = self._two_item_sale()
 		frappe.db.set_value("POS Invoice", sale["summary"]["name"], "remarks", "Original remark")
 		self._allow_cash_returns()
-		result = self._return(self._return_payload(sale, qty="1", amount="-100"))
+		result = self._return(self._return_payload(sale, qty="1"))
 		self.assertTrue(result["ok"])
 		invoice = frappe.get_doc("POS Invoice", result["data"]["return_sale"]["summary"]["name"])
 		self.assertTrue(invoice.is_return)
@@ -405,33 +401,35 @@ class TestSaleSubmit(IntegrationTestCase):
 	def test_return_rejects_qty_beyond_core_remaining_quantity(self):
 		sale = self._two_item_sale()
 		self._allow_cash_returns()
-		self._return(self._return_payload(sale, qty="1", amount="-100"))
-		result = self._return(self._return_payload(sale, qty="2", amount="-200"))
+		self._return(self._return_payload(sale, qty="1"))
+		result = self._return(self._return_payload(sale, qty="2"))
 		self.assertFalse(result["ok"])
 		self.assertEqual(result["error"]["code"], "RETURN_LIMIT_EXCEEDED")
 		self.assertEqual(
 			result["error"]["details"],
 			{
+				"source_name": sale["summary"]["name"],
 				"source_item_row": sale["items"][0]["row_id"],
 				"requested_qty": "2",
 				"remaining_qty": "1.0",
+				"refresh_endpoint": "v1.sales.get",
 			},
 		)
 
-	def test_return_rejects_disallowed_or_unsettled_refund_payments(self):
+	def test_return_requires_a_configured_refund_mode(self):
 		sale = self._submit()["data"]["sale"]
-		result = self._return(self._return_payload(sale, qty="1", amount="-100"))
+		result = self._return(self._return_payload(sale, qty="1"))
 		self.assertFalse(result["ok"])
-		self.assertEqual(result["error"]["code"], "INVALID_PAYMENT")
+		self.assertEqual(result["error"]["code"], "PROFILE_CONFIGURATION_INVALID")
 		self._allow_cash_returns()
-		result = self._return(self._return_payload(sale, qty="1", amount="-99"))
-		self.assertFalse(result["ok"])
-		self.assertEqual(result["error"]["code"], "INVALID_PAYMENT")
+		result = self._return(self._return_payload(sale, qty="1"))
+		self.assertTrue(result["ok"])
+		self.assertEqual(result["data"]["return_sale"]["refund_amount"], "100.0")
 
 	def test_return_replay_returns_same_reference(self):
 		sale = self._submit()["data"]["sale"]
 		self._allow_cash_returns()
-		payload = self._return_payload(sale, qty="1", amount="-100")
+		payload = self._return_payload(sale, qty="1")
 		key = str(uuid4())
 		with patch("frappe.get_request_header", return_value=key):
 			first = self._return_endpoint(payload)
@@ -469,12 +467,11 @@ class TestSaleSubmit(IntegrationTestCase):
 		frappe.local.form_dict = frappe._dict(payload)
 		return sales_api.create_return()
 
-	def _return_payload(self, sale, *, qty, amount):
+	def _return_payload(self, sale, *, qty):
 		return {
 			"source_name": sale["summary"]["name"],
 			"reason": " Damaged ",
 			"items": [{"source_item_row": sale["items"][0]["row_id"], "qty": qty}],
-			"payments": [{"mode_of_payment": "Cash", "amount": amount, "reference_no": None}],
 		}
 
 	def _allow_cash_returns(self):

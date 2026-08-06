@@ -116,8 +116,9 @@
 ### History, Return, and Cancellation
 
 - **Proposed**: Sale list includes only scoped POS Invoices and preserves walk-in display names.
-- **Proposed**: Full and partial returns create correctly negative items and payments.
-- **Proposed**: A second return cannot exceed remaining quantity.
+- **Approved**: Full and partial returns create correctly negative items and server-selected refund payments; Android supplies no accounting values.
+- **Approved**: Fresh sale detail projects cumulative submitted returns and remaining quantity. Exact-boundary creation succeeds; sequential and concurrent excess attempts return `RETURN_LIMIT_EXCEEDED` without artifacts.
+- **Approved**: Return quote and create prove zero/one/multiple refund-mode rules, authoritative taxes/discounts/rounding/refund totals, exact quantity decimals, required reason, replay, rollback, and serial/batch permission behavior.
 - **Proposed**: Return reason is trimmed, required, and appended as `Mobile POS Return Reason: <reason>` to standard remarks.
 - **Proposed**: Existing remarks remain unchanged before the one-newline append.
 - **Approved**: No Android `sales.cancel` endpoint exists in MVP; cashier corrections use returns and manager cancellation remains an ERPNext Desk test outside the mobile suite.

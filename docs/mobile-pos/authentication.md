@@ -70,6 +70,7 @@
 | POS Closing Entry | Yes | Yes | Yes | Yes | No | No delete, amend, report, export, import, or share |
 | Customer | Yes | No | No | N/A | N/A | None |
 | Item | Yes | No | No | N/A | N/A | None |
+| Serial and Batch Bundle | Yes | Yes | Yes | Yes | No | No delete, amend, report, export, import, or share |
 | Sales Invoice | No | No | No | No | No | None |
 | Mobile POS Request | No | No | No | N/A | No | Service-controlled only |
 
@@ -87,6 +88,7 @@
 | Catalog/search/scan | Required | Eligible profile, allowed company/warehouse | Item/POS Profile read as applicable |
 | Submit sale | Required | Own active session, matching profile | POS Invoice create + submit |
 | View sale | Required | Own assigned profile/opening scope | POS Invoice read |
+| Quote return | Required | Source visible, current opening, return limits valid | POS Invoice read + create + submit; Serial and Batch Bundle as required by core |
 | Create return | Required | Source visible, return limits valid | POS Invoice read + create + submit |
 | Closing preview | Required | Own opening and assigned profile | POS Opening Entry/POS Invoice read |
 | Submit closing | Required | Own opening and assigned profile | POS Closing Entry create + submit |

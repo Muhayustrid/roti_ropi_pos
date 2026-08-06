@@ -130,10 +130,10 @@ class TestMobilePOSLifecycle(IntegrationTestCase):
 			"client_accepted_grand_total": "200",
 			"items": [
 				{
-					"item_code": ITEM,
+					"item_code": self._batch_item,
 					"qty": "2",
 					"uom": self._uom,
-					"batch_no": None,
+					"batch_no": self._batch_no,
 					"serial_numbers": [],
 				}
 			],
@@ -188,6 +188,16 @@ class TestMobilePOSLifecycle(IntegrationTestCase):
 				"item": item_code,
 			}
 		).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "Item Price",
+				"item_code": item_code,
+				"price_list": self.profile.selling_price_list,
+				"price_list_rate": 100,
+				"uom": self._uom,
+			}
+		).insert(ignore_permissions=True)
+		make_stock_entry(target=WAREHOUSE, item_code=item_code, qty=10, basic_rate=100, batch_no=batch.name)
 		frappe.cache().delete_value(f"erpnext:barcode_scan:{batch.name}")
 		return item_code, batch.name, uom
 
@@ -349,14 +359,26 @@ class TestMobilePOSLifecycle(IntegrationTestCase):
 			"source_name": sale_name,
 			"reason": "Customer changed mind",
 			"items": [{"source_item_row": row_id, "qty": "1"}],
-			"payments": [{"mode_of_payment": "Cash", "amount": "-100", "reference_no": None}],
 		}
+		frappe.local.form_dict = frappe._dict(
+			{"source_name": sale_name, "items": return_payload["items"]}
+		)
+		return_quote = sales_api.quote_return()
+		self.assertTrue(return_quote["ok"], return_quote)
+		self.assertEqual(
+			return_quote["data"]["return_quote"]["items"][0]["batch_numbers"],
+			[self._batch_no],
+		)
 		with patch("frappe.get_request_header", return_value=return_key):
 			frappe.local.form_dict = frappe._dict(return_payload)
 			return_result = sales_api.create_return()
 		self.assertTrue(return_result["ok"], return_result)
 		return_name = return_result["data"]["return_sale"]["summary"]["name"]
 		self.assertTrue(return_name)
+		self.assertEqual(
+			return_result["data"]["return_sale"]["items"][0]["batch_numbers"],
+			[self._batch_no],
+		)
 
 		# Check reason appended to remarks on the return POS Invoice.
 		return_doc = frappe.get_doc("POS Invoice", return_name)
