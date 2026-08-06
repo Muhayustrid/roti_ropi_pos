@@ -16,6 +16,9 @@ from roti_ropi_pos.mobile_pos.customers import resolve_customer
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.mobile_pos.idempotency import MutationResult
 from roti_ropi_pos.mobile_pos.sessions import get_current_opening
+from roti_ropi_pos.mobile_pos.validation import (
+	sale_payment_amount_policy,
+)
 
 
 def submit_sale(payload: dict, transaction_id: str) -> MutationResult:
@@ -51,9 +54,11 @@ def submit_sale(payload: dict, transaction_id: str) -> MutationResult:
 	_verify_accepted_total(invoice, payload["client_accepted_grand_total"])
 	invoice.set("payments", [])
 	_append_payments(invoice, profile, payload["payments"])
+	verify_payment_amount_policy(invoice.currency, payload["payments"])
 	invoice.set_paid_amount()
 	invoice.set_account_for_mode_of_payment()
 	invoice.set_outstanding_amount()
+	verify_exact_settlement(invoice, [Decimal(str(row["amount"])) for row in payload["payments"]])
 	_verify_fully_settled(invoice)
 	invoice.insert()
 	invoice.submit()
@@ -62,6 +67,197 @@ def submit_sale(payload: dict, transaction_id: str) -> MutationResult:
 		reference_doctype="POS Invoice",
 		reference_name=invoice.name,
 	)
+
+
+def build_sale_quote(payload: dict) -> dict:
+	"""Return a server-authoritative snapshot of the payable for a full cart.
+
+	The snapshot is read-only, non-binding, and creates no POS Invoice, no
+	Mobile POS Request, and no stock reservation. ``sales.submit`` remains the
+	only authoritative call. The returned ``payable`` is the same ``Decimal``
+	that ``sales.submit`` compares against payment sums.
+
+	The cashier must hold an active POS Opening Entry for the resolved
+	profile: ``get_current_opening`` already filters by the authenticated
+	user and the selected profile, so an opening that belongs to a
+	different user or a different profile cannot satisfy this gate.
+	"""
+	profile = get_authorized_profile(payload["pos_profile"])
+	require_pos_invoice_mode()
+	if not get_current_opening(profile):
+		raise MobilePOSAPIError(
+			"NO_OPEN_SESSION",
+			"No open POS session is available for this profile.",
+			status=422,
+			details={"pos_profile": profile.name},
+		)
+	require_doc_permission("Item", "read")
+	customer = resolve_customer(
+		profile,
+		payload.get("customer"),
+		payload.get("walk_in_customer_name"),
+	)
+	invoice = frappe.new_doc("POS Invoice")
+	invoice.is_pos = 1
+	invoice.pos_profile = profile.name
+	invoice.company = profile.company
+	invoice.customer = customer.name
+	invoice.custom_walk_in_customer_name = customer.custom_walk_in_customer_name
+	_append_items(invoice, profile, customer.name, payload["items"])
+	invoice.set_missing_values()
+	invoice.calculate_taxes_and_totals()
+	# ``rounded_total`` is ERPNext's authoritative payable when the site is
+	# configured to use rounding; otherwise ``grand_total`` is authoritative.
+	rounded = Decimal(str(invoice.rounded_total or 0))
+	grand = Decimal(str(invoice.grand_total or 0))
+	payable = rounded if rounded > 0 else grand
+	# The snapshot is not persisted: drop the in-memory doc and any reserved
+	# DB resources by relying on Frappe's request-savepoint from the endpoint
+	# decorator. The endpoint itself never calls ``insert`` or ``submit``.
+	return {
+		"grand_total": str(grand),
+		"payable": str(payable),
+		"currency": invoice.currency,
+		"items": [sale_item_dto(row) for row in invoice.items],
+		"taxes": [sale_tax_dto(row) for row in invoice.taxes],
+		"payment_modes": _sale_payment_modes(profile),
+		"payment_amount_policy": sale_payment_amount_policy(invoice.currency),
+	}
+
+
+def _sale_payment_modes(profile) -> list[dict]:
+	"""Project sale payment modes from the current POS Profile.
+
+	Returns only modes that are enabled for the profile and whose linked
+	``Mode of Payment`` is enabled in core. The current backend rule permits
+	multiple distinct mode rows; the snapshot preserves POS Profile row order.
+	"""
+	modes = []
+	for row in profile.payments:
+		mode_name = row.mode_of_payment
+		if not mode_name:
+			continue
+		if not frappe.get_cached_value("Mode of Payment", mode_name, "enabled"):
+			continue
+		modes.append(
+			{
+				"mode_of_payment": mode_name,
+				"default": int(row.default or 0) == 1,
+				"allow_in_returns": int(row.allow_in_returns or 0) == 1,
+				"currency": profile.currency,
+			}
+		)
+	return modes
+
+
+def verify_payment_amount_policy(currency: str, payments: list[dict]) -> None:
+	"""Apply the sale ``payment_amount_policy`` to every submitted payment row.
+
+	The API parser owns validation of the original decimal-string syntax. After
+	that representation is converted to ``Decimal``, this service boundary
+	validates only its semantic value: finite, positive, and within the currency
+	scale. No rounding or truncation is applied.
+	"""
+	decimal_places = sale_payment_amount_policy(currency)["decimal_places"]
+	for row in payments:
+		amount = row.get("amount")
+		if not isinstance(amount, Decimal):
+			raise MobilePOSAPIError(
+				"INVALID_REQUEST",
+				"amount is invalid.",
+				details={"field": "amount", "reason": "non_decimal_amount"},
+			)
+		if not amount.is_finite():
+			raise MobilePOSAPIError(
+				"INVALID_REQUEST",
+				"amount is invalid.",
+				details={"field": "amount", "reason": "non_finite_amount"},
+			)
+		if amount == 0:
+			raise MobilePOSAPIError(
+				"INVALID_PAYMENT",
+				"Payment amount is invalid.",
+				status=422,
+				details={
+					"field": "amount",
+					"mode_of_payment": None,
+					"reason": "empty_payments_amount",
+				},
+			)
+		if amount < 0:
+			raise MobilePOSAPIError(
+				"INVALID_REQUEST",
+				"amount is invalid.",
+				details={"field": "amount", "reason": "negative_amount"},
+			)
+		if max(-amount.as_tuple().exponent, 0) > decimal_places:
+			raise MobilePOSAPIError(
+				"INVALID_REQUEST",
+				"amount is invalid.",
+				details={"field": "amount", "reason": "excessive_scale"},
+			)
+
+
+def verify_exact_settlement(invoice, payments: list[Decimal]) -> None:
+	"""Reject underpayment and overpayment before ERPNext insert/submit.
+
+	The comparison is exact ``Decimal`` arithmetic with no rounding or
+	truncation. The payable is ``rounded_total`` when ERPNext applied rounding,
+	otherwise ``grand_total``. After ERPNext finalizes payment fields the
+	caller still verifies ``outstanding_amount == 0`` and ``change_amount == 0``
+	through the existing settlement guard.
+	"""
+	if not payments:
+		raise MobilePOSAPIError(
+			"INVALID_PAYMENT",
+			"Payment details are invalid.",
+			status=422,
+			details={"mode_of_payment": None, "reason": "empty_payments"},
+		)
+	parsed = []
+	for amount in payments:
+		if amount == 0:
+			raise MobilePOSAPIError(
+				"INVALID_REQUEST",
+				"amount is invalid.",
+				details={"field": "amount", "reason": "zero_amount"},
+			)
+		if amount < 0:
+			raise MobilePOSAPIError(
+				"INVALID_REQUEST",
+				"amount is invalid.",
+				details={"field": "amount", "reason": "negative_amount"},
+			)
+		parsed.append(amount)
+	received = sum(parsed)
+	rounded = Decimal(str(invoice.rounded_total or 0))
+	grand = Decimal(str(invoice.grand_total or 0))
+	payable = rounded if rounded > 0 else grand
+	if received < payable:
+		raise MobilePOSAPIError(
+			"INVALID_PAYMENT",
+			"Payment details are invalid.",
+			status=422,
+			details={
+				"mode_of_payment": None,
+				"reason": "underpayment",
+				"payable": str(payable),
+				"received": str(received),
+			},
+		)
+	if received > payable:
+		raise MobilePOSAPIError(
+			"INVALID_PAYMENT",
+			"Payment details are invalid.",
+			status=422,
+			details={
+				"mode_of_payment": None,
+				"reason": "overpayment",
+				"payable": str(payable),
+				"received": str(received),
+				"change_amount": str(Decimal(str(invoice.change_amount or 0))),
+			},
+		)
 
 
 def list_sales(profile, *, status: str, q: str, start: int, limit: int) -> dict:
@@ -428,6 +624,17 @@ def _verify_accepted_total(invoice, accepted: Decimal) -> None:
 def _verify_fully_settled(invoice) -> None:
 	if Decimal(str(invoice.outstanding_amount)) != Decimal("0"):
 		raise _invalid_payment(None, "Invoice is not fully settled.")
+	if Decimal(str(invoice.change_amount or 0)) != Decimal("0"):
+		raise MobilePOSAPIError(
+			"INVALID_PAYMENT",
+			"Payment details are invalid.",
+			status=422,
+			details={
+				"mode_of_payment": None,
+				"reason": "change_amount_nonzero",
+				"change_amount": str(invoice.change_amount),
+			},
+		)
 
 
 def sale_summary(doc) -> dict:

@@ -82,7 +82,11 @@ def _parse_closing_payload(value: dict) -> dict:
 				"mode_of_payment is invalid.",
 				details={"field": "mode_of_payment", "reason": "Expected a payment mode name."},
 			)
-		amount = decimal_string(row.get("closing_amount"), field="closing_amount")
+		amount = decimal_string(
+			row.get("closing_amount"),
+			field="closing_amount",
+			allow_zero=True,
+		)
 		parsed_balances.append({"mode_of_payment": mop.strip(), "closing_amount": amount})
 	return {
 		"pos_profile": pos_profile.strip(),

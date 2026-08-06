@@ -81,6 +81,7 @@ class TestAuthentication(IntegrationTestCase):
 				"/api/method/roti_ropi_pos.api.v1.catalog.scan",
 				"/api/method/roti_ropi_pos.api.v1.catalog.quote_item",
 				"/api/method/roti_ropi_pos.api.v1.sales.submit",
+				"/api/method/roti_ropi_pos.api.v1.sales.quote_cart",
 				"/api/method/roti_ropi_pos.api.v1.sales.list",
 				"/api/method/roti_ropi_pos.api.v1.sales.get",
 				"/api/method/roti_ropi_pos.api.v1.sales.create_return",
@@ -298,3 +299,35 @@ class TestAuthentication(IntegrationTestCase):
 		with self._request(path=path, user="Guest", form={"client_id": CLIENT_ID}):
 			with self.assertRaises(frappe.PermissionError):
 				validate_mobile_oauth_request(path, "Guest")
+
+	QUOTE_CART_PATH = "/api/method/roti_ropi_pos.api.v1.sales.quote_cart"
+
+	def test_quote_cart_path_is_allowlisted_for_v1(self):
+		self.assertIn(self.QUOTE_CART_PATH, MOBILE_POS_PATHS)
+
+	def test_quote_cart_accepts_authorised_cashier_with_active_bearer(self):
+		with self._request(path=self.QUOTE_CART_PATH, authorization=f"Bearer {TOKEN}"):
+			validate_mobile_api_scope()
+
+	def test_quote_cart_rejects_cashier_with_no_bearer_token(self):
+		with self._request(path=self.QUOTE_CART_PATH, authorization=""):
+			with self.assertRaises(frappe.AuthenticationError):
+				validate_mobile_api_scope()
+
+	def test_quote_cart_rejects_token_for_other_cashier(self):
+		other_token = f"quote-other-{frappe.generate_hash(length=8)}"
+		make_bearer_token(other_token, client_id=CLIENT_ID, user=self.other)
+		# Cashier is the default user; presenting the other cashier's token is
+		# rejected because the bearer is bound to its issued user.
+		with self._request(path=self.QUOTE_CART_PATH, authorization=f"Bearer {other_token}"):
+			with self.assertRaises(frappe.AuthenticationError):
+				validate_mobile_api_scope()
+
+	def test_quote_cart_rejects_user_without_cashier_role(self):
+		from roti_ropi_pos.tests.test_sessions import make_plain_user
+
+		plain = make_plain_user(f"quote-plain-{frappe.generate_hash(length=8)}@rotiropi.test")
+		make_bearer_token("quote-plain", client_id=CLIENT_ID, user=plain)
+		with self._request(path=self.QUOTE_CART_PATH, user=plain, authorization="Bearer quote-plain"):
+			with self.assertRaises(frappe.AuthenticationError):
+				validate_mobile_api_scope()

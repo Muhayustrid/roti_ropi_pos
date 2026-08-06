@@ -8,6 +8,7 @@ from erpnext.stock.doctype.stock_entry.stock_entry_utils import make_stock_entry
 from frappe.tests import IntegrationTestCase
 
 from roti_ropi_pos.api.v1 import closing as closing_api
+from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.tests.helpers import close_test_openings, make_cashier, make_opening_entry
 from roti_ropi_pos.tests.test_sessions import COMPANY, WAREHOUSE, make_valid_profile
 
@@ -118,6 +119,20 @@ class TestClosingPreview(IntegrationTestCase):
 				result = self._close(str(uuid4()), amount=amount)
 				self.assertFalse(result["ok"])
 				self.assertEqual(result["error"]["code"], "INVALID_REQUEST")
+
+	def test_closing_parser_accepts_zero_amount(self):
+		payload = closing_api._parse_closing_payload(self._closing_payload(amount="0"))
+		self.assertEqual(payload["closing_balances"][0]["closing_amount"], Decimal("0"))
+
+	def test_closing_parser_rejects_negative_amount(self):
+		with self.assertRaises(MobilePOSAPIError) as error:
+			closing_api._parse_closing_payload(self._closing_payload(amount="-1"))
+		self.assertEqual(error.exception.details["reason"], "negative_amount")
+
+	def test_closing_parser_rejects_malformed_amount(self):
+		with self.assertRaises(MobilePOSAPIError) as error:
+			closing_api._parse_closing_payload(self._closing_payload(amount="not-a-number"))
+		self.assertEqual(error.exception.details["reason"], "malformed_decimal")
 
 	def test_preview_stale_opening_warning_preserved(self):
 		frappe.db.set_value(

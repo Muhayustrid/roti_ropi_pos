@@ -9,26 +9,53 @@ from roti_ropi_pos.api.v1.bootstrap import mobile_pos_endpoint
 from roti_ropi_pos.mobile_pos.authorization import get_authorized_profile
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.mobile_pos.idempotency import execute_idempotent
+from roti_ropi_pos.mobile_pos.invoices import build_sale_quote, submit_sale
 from roti_ropi_pos.mobile_pos.invoices import create_return as create_return_service
 from roti_ropi_pos.mobile_pos.invoices import get_sale as get_sale_service
 from roti_ropi_pos.mobile_pos.invoices import list_sales as list_sales_service
-from roti_ropi_pos.mobile_pos.invoices import submit_sale
 from roti_ropi_pos.mobile_pos.responses import success
-from roti_ropi_pos.mobile_pos.validation import decimal_string, require_json_object
+from roti_ropi_pos.mobile_pos.validation import (
+	decimal_string,
+	require_json_object,
+	sale_payment_amount_string,
+)
 
 
 @frappe.whitelist(methods=["POST"])
 @mobile_pos_endpoint
 def submit(**kwargs) -> dict:
 	"""Submit one idempotent Mobile POS sale."""
-	payload = _parse_sale_payload(dict(frappe.form_dict))
-	profile = get_authorized_profile(payload["pos_profile"])
+	profile = get_authorized_profile(
+		_name(
+			frappe.form_dict.get("pos_profile"),
+			"pos_profile",
+			"Expected a POS Profile name.",
+		)
+	)
+	payload = _parse_sale_payload(dict(frappe.form_dict), currency=profile.currency)
 	_lock_stock(payload["items"], profile.warehouse)
 	return execute_idempotent(
 		"v1.sales.submit",
 		payload,
 		lambda transaction_id: submit_sale(payload, transaction_id),
 	)
+
+
+@frappe.whitelist(methods=["POST"])
+@mobile_pos_endpoint
+def quote_cart(**kwargs) -> dict:
+	"""Return a server-authoritative snapshot of the full cart payable.
+
+	The snapshot is read-only, non-binding, and intentionally avoids
+	``X-Idempotency-Key``, ``Mobile POS Request``, and stock reservation.
+	``sales.submit`` remains the only authoritative endpoint and recalculates
+	authoritative totals during its own transaction.
+	"""
+	payload = _parse_quote_payload(dict(frappe.form_dict))
+	# ``build_sale_quote`` is the single authority for profile authorization
+	# and active-opening enforcement; this endpoint intentionally has no
+	# stock lock, no Mobile POS Request, and no idempotency key.
+	return success(build_sale_quote(payload))
 
 
 @frappe.whitelist(methods=["GET"])
@@ -97,7 +124,7 @@ def _lock_stock(items: list[dict], warehouse: str) -> None:
 		)
 
 
-def _parse_sale_payload(value) -> dict:
+def _parse_sale_payload(value, *, currency: str | None = None) -> dict:
 	value.pop("cmd", None)
 	payload = require_json_object(value, field="payload")
 	_unknown(
@@ -120,14 +147,46 @@ def _parse_sale_payload(value) -> dict:
 			"Expected a display name or null.",
 		),
 		"client_accepted_grand_total": _positive_decimal(
-			payload.get("client_accepted_grand_total"), "client_accepted_grand_total"
+			payload.get("client_accepted_grand_total"),
+			"client_accepted_grand_total",
+			currency=currency,
 		),
 		"items": _items(payload.get("items")),
-		"payments": _payments(payload.get("payments")),
+		"payments": _payments(payload.get("payments"), currency=currency),
 	}
 
 
-def _parse_return_payload(value) -> dict:
+def _parse_quote_payload(value) -> dict:
+	"""Parse a full cart for ``sales.quote_cart`` without payment rows.
+
+	The quote is non-binding and intentionally has no payment rows and no
+	``client_accepted_grand_total``. Android does not need to send a payment
+	plan to obtain a server-authoritative payable snapshot.
+	"""
+	value.pop("cmd", None)
+	payload = require_json_object(value, field="payload")
+	_unknown(
+		payload,
+		{
+			"pos_profile",
+			"customer",
+			"walk_in_customer_name",
+			"items",
+		},
+	)
+	return {
+		"pos_profile": _name(payload.get("pos_profile"), "pos_profile", "Expected a POS Profile name."),
+		"customer": _optional_name(payload.get("customer"), "customer", "Expected a Customer name or null."),
+		"walk_in_customer_name": _optional_name(
+			payload.get("walk_in_customer_name"),
+			"walk_in_customer_name",
+			"Expected a display name or null.",
+		),
+		"items": _items(payload.get("items")),
+	}
+
+
+def _parse_return_payload(value, *, currency: str | None = None) -> dict:
 	value.pop("cmd", None)
 	payload = require_json_object(value, field="payload")
 	_unknown(payload, {"source_name", "reason", "items", "payments"})
@@ -156,12 +215,12 @@ def _parse_return_payload(value) -> dict:
 		"source_name": _name(payload.get("source_name"), "source_name", "Expected a POS Invoice name."),
 		"reason": reason,
 		"items": parsed_items,
-		"payments": _return_payments(payload.get("payments")),
+		"payments": _return_payments(payload.get("payments"), currency=currency),
 	}
 
 
-def _return_payments(value) -> list[dict]:
-	return _payments(value, positive=False)
+def _return_payments(value, *, currency: str | None = None) -> list[dict]:
+	return _payments(value, positive=False, currency=currency)
 
 
 def _items(value) -> list[dict]:
@@ -192,7 +251,12 @@ def _items(value) -> list[dict]:
 	return items
 
 
-def _payments(value, *, positive: bool = True) -> list[dict]:
+def _payments(
+	value,
+	*,
+	positive: bool = True,
+	currency: str | None = None,
+) -> list[dict]:
 	if not isinstance(value, builtins.list) or not value:
 		raise _invalid("payments", "Expected a non-empty array of payments.")
 	payments = []
@@ -200,9 +264,15 @@ def _payments(value, *, positive: bool = True) -> list[dict]:
 		if not isinstance(row, dict):
 			raise _invalid("payments", f"Row {index} must be an object.")
 		_unknown(row, {"mode_of_payment", "amount", "reference_no"})
-		amount = decimal_string(row.get("amount"), field="amount")
-		if (positive and amount <= 0) or (not positive and amount >= 0):
-			raise _invalid("amount", f"Expected a {'positive' if positive else 'negative'} decimal string.")
+		if positive and currency is not None:
+			amount = Decimal(sale_payment_amount_string(row.get("amount"), currency=currency))
+		else:
+			amount = decimal_string(
+				row.get("amount"),
+				field="amount",
+				currency=currency,
+				positive=positive,
+			)
 		payments.append(
 			{
 				"mode_of_payment": _name(
@@ -249,8 +319,8 @@ def _integer(value, field: str, *, minimum: int) -> int:
 	return integer
 
 
-def _positive_decimal(value, field: str) -> Decimal:
-	parsed = decimal_string(value, field=field)
+def _positive_decimal(value, field: str, *, currency: str | None = None) -> Decimal:
+	parsed = decimal_string(value, field=field, currency=currency)
 	if parsed <= 0:
 		raise _invalid(field, "Expected a positive decimal string.")
 	return parsed

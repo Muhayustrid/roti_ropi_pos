@@ -14,7 +14,10 @@
 - **Proposed**: HTTPS is mandatory. JSON request bodies use `Content-Type: application/json`.
 - **Approved**: Android sends `Authorization: Bearer <access_token>` using an active token issued to the configured public Mobile POS OAuth Client through Authorization Code with mandatory PKCE S256. The token user must be enabled and have `Mobile POS Cashier`. Cookie, API-key, Basic, shared, wrong-client bearer, and embedded-secret access are prohibited.
 - **Proposed**: Mutations require `X-Idempotency-Key` and accept `POST` only.
-- **Proposed**: Monetary amounts and quantities are decimal strings. Dates are `YYYY-MM-DD`; timestamps are ISO 8601 with an offset.
+- **Proposed**: Monetary amounts and quantities are decimal strings. Decimal
+  strings preserve exact values but do not guarantee fixed trailing zeroes;
+  clients must treat examples such as `"55000.00"` and `"55000"` as equivalent
+  numeric values. Dates are `YYYY-MM-DD`; timestamps are ISO 8601 with an offset.
 - **Approved**: Every v1 endpoint requires ERPNext POS Settings invoice mode `POS Invoice` and returns the same `UNSUPPORTED_POS_MODE` error when the site is configured for direct Sales Invoice mode.
 
 ## Envelopes
@@ -451,6 +454,98 @@
 
 - **Proposed**: When `uom` is present but `conversion_factor` is absent, `warnings` contains `{ "code": "MISSING_UOM_CONVERSION", "message": "The selected UOM has no conversion factor." }`.
 
+### `POST sales.quote_cart`
+
+```json
+{
+  "pos_profile": "OUTLET-01",
+  "customer": null,
+  "walk_in_customer_name": "Ayu",
+  "items": [
+    {
+      "item_code": "CROISSANT-PACK",
+      "qty": "2",
+      "uom": "Pack",
+      "batch_no": "BATCH-QR-0001",
+      "serial_numbers": []
+    },
+    {
+      "item_code": "COFFEE",
+      "qty": "1",
+      "uom": "Cup",
+      "batch_no": null,
+      "serial_numbers": []
+    }
+  ]
+}
+```
+
+- **Approved**: Server-authoritative full-cart snapshot at response time. The
+  endpoint is read-only, non-binding, and explicitly does not lock stock,
+  create POS Invoices, or write any durable Mobile POS Request.
+- **Approved**: The endpoint requires an active opening owned by the
+  authenticated cashier for the selected POS Profile. If none exists, it
+  returns `NO_OPEN_SESSION` with the selected `pos_profile` in `details`.
+- **Approved**: The request intentionally has no `client_accepted_grand_total`
+  and no `payments` rows. Android cannot use this endpoint as a covert
+  submit path; the parser rejects both fields with `INVALID_REQUEST`.
+- **Approved**: The endpoint does not require `X-Idempotency-Key`, does not
+  call `execute_idempotent`, and never creates a `Mobile POS Request` row.
+  Repeated calls are independent reads.
+- **Approved**: The returned `grand_total` is the value Android sends as
+  `client_accepted_grand_total`; `sales.submit` compares it with the rebuilt
+  invoice's `grand_total` for the `PRICE_CHANGED` guard. The returned `payable`
+  is the value Android must match with the sum of all payment rows and is the
+  same `Decimal` value that `sales.submit` compares against payment sums. When ERPNext applied
+  rounding, `payable` equals `rounded_total`; otherwise it equals
+  `grand_total`. Therefore `grand_total` and `payable` may differ when rounding
+  applies. Android never re-sums per-item quotes to derive either total.
+- **Approved**: `payment_modes[]` only includes modes that are enabled for
+  the POS Profile and whose linked `Mode of Payment` is enabled in core.
+  Order matches the POS Profile row order. Android uses this list for
+  allowed mode names, display order, and per-mode default flag.
+- **Approved**: `payment_amount_policy` is the contract the cashier must
+  apply to every submitted payment row. Currency decimal places are derived
+  server-side through ERPNext's precision utility, with a validated fallback
+  from `Currency.fraction_units`, and may vary by profile. Android does not
+  hardcode any precision.
+
+```json
+{
+  "grand_total": "55000",
+  "payable": "55000.00",
+  "currency": "IDR",
+  "items": [
+    {
+      "row_id": null,
+      "item_code": "CROISSANT-PACK",
+      "item_name": "Croissant Pack",
+      "qty": "2",
+      "uom": "Pack",
+      "conversion_factor": "6",
+      "rate": "25000",
+      "amount": "50000",
+      "batch_no": "BATCH-QR-0001",
+      "serial_numbers": []
+    }
+  ],
+  "taxes": [
+    {"description": "VAT", "rate": "10", "tax_amount": "5000", "total": "55000"}
+  ],
+  "payment_modes": [
+    {"mode_of_payment": "Cash", "default": true, "allow_in_returns": false, "currency": "IDR"}
+  ],
+  "payment_amount_policy": {
+    "currency": "IDR",
+    "decimal_places": 2,
+    "minimum": "0.01",
+    "api_syntax": "ascii_decimal_dot",
+    "rounding": "reject",
+    "policy_version": "sale-payment-amount/v1"
+  }
+}
+```
+
 ### `POST sales.submit`
 
 ```json
@@ -476,7 +571,7 @@
     }
   ],
   "payments": [
-    {"mode_of_payment": "Cash", "amount": "60000", "reference_no": null}
+    {"mode_of_payment": "Cash", "amount": "55000", "reference_no": null}
   ]
 }
 ```
@@ -490,7 +585,35 @@
 - **Approved**: Quote supplies the profile Company and Customer context but is non-authoritative. POS Invoice submission is the authoritative Company/account/internal-party compatibility gate.
 - **Approved**: `walk_in_customer_name` is optional only when the resolved Customer equals the profile's default walk-in Customer. It maps to bakery's existing `custom_walk_in_customer_name`; the field is rejected for a registered non-walk-in Customer.
 - **Approved**: The endpoint never creates a Customer.
-- **Approved**: Payment modes must be distinct, enabled for the profile, and use server-derived accounts. Multiple modes are allowed only when core calculation finishes with `outstanding_amount == 0`; underpayment returns `INVALID_PAYMENT` and creates no invoice. Overpayment/change remains subject to ERPNext's core POS rules.
+- **Approved**: Payment modes must be distinct, enabled for the profile, and
+  use server-derived accounts. Mobile POS v1 requires exact settlement:
+  underpayment and overpayment both return `INVALID_PAYMENT` and create no
+  invoice.
+- **Approved**: Sale payment decimal policy is the documented
+  `payment_amount_policy` for the profile currency. Each row must be an
+  ASCII decimal string with at most the server-projected
+  `decimal_places` fractional digits. ``0``, negatives, malformed strings,
+  and excessive scale are rejected before insert/submit. No `quantize`
+  rounding or truncation is applied; comparison uses exact `Decimal`
+  arithmetic.
+- **Approved**: Item quantity uses the shared quantity decimal policy and is
+  independent of currency precision. For example, `qty: "0.125"` remains valid
+  for a two-decimal-place currency when the item's existing UOM and ERPNext
+  quantity rules allow it.
+- **Approved**: Exact settlement is server-enforced. The sum of parsed
+  payment amounts must equal the authoritative payable (``rounded_total``
+  when ERPNext applied rounding, otherwise ``grand_total``). Underpayment
+  returns `INVALID_PAYMENT` with `details.reason: "underpayment"`,
+  overpayment returns `INVALID_PAYMENT` with `details.reason:
+  "overpayment"`, and either condition creates no POS Invoice. The service
+  also rejects `change_amount != 0` after ERPNext finalizes payment fields
+  and does not pre-set `change` on payment rows.
+- **Approved**: Empty payments, zero amount, negative amount, malformed
+  decimal, and excessive scale are rejected before insert/submit. A zero row
+  returns `INVALID_PAYMENT` with `details.reason:
+  "empty_payments_amount"`; malformed, negative, and excessive-scale request
+  values return `INVALID_REQUEST`. The response `details` always carries a
+  structured `reason` field.
 - **Proposed**: Returns `{ "sale": SaleDetail }`; first execution sets HTTP 201 and replay sets HTTP 200.
 
 ### `GET sales.get`
