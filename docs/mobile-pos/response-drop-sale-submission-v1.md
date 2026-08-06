@@ -1,0 +1,160 @@
+# Mobile POS Response-Drop Protocol — Sale Submission Extension
+
+## Evidence Legend
+
+- **Verified**: Confirmed in installed source.
+- **Approved**: A protocol decision approved for staging tooling and
+  regression runs.
+- **Proposed**: Target behavior the operator and Android must follow.
+- **Inferred**: A consequence that should be exercised by the operator.
+
+## Scope
+
+- **Approved**: This document extends `mobile-pos-response-drop/v1` to
+  cover `v1.sales.submit`. `v1.sales.quote_cart` is intentionally out of
+  scope: it is read-only, has no `X-Idempotency-Key`, and creates no
+  `Mobile POS Request` or `POS Invoice`.
+- **Approved**: Protocol is a template the operator follows during a
+  staging ingress test. It is not evidence that a particular run
+  happened; the operator captures that evidence separately.
+
+## External Operator
+
+- **Approved**: A non-Android external operator runs the staging ingress
+  through the normal Mobile POS OAuth Authorization Code + PKCE S256
+  flow.
+- **Approved**: The operator uses a single cashier account, a single
+  POS Profile, and one verified valid `POS Opening Entry`. No manual
+  Frappe Desk intervention beyond the protocol steps.
+- **Approved**: Android is not part of the response-drop run. The
+  protocol does not create Android-side fixtures, proxies, or
+  certificate workarounds.
+
+## Required Linkage
+
+- **Verified**: ``POS Invoice`` is the durable business document for
+  every v1 sale.
+- **Verified**: ``Mobile POS Request`` is the durable control record
+  for every ``v1.sales.submit`` execution; its ``idempotency_key`` and
+  ``reference_name`` columns link the request row to the POS Invoice.
+- **Approved**: Cleanup test pass uses the standard column linkage
+  above. No custom transaction field is required. If a custom
+  transaction field is added later, this document must be updated
+  before any new protocol run.
+
+## Pre-Conditions
+
+- **Proposed**: ``Mobile POS Capability`` records a fresh
+  ``mobile_pos:sales.submit`` capability for the cashier used in the
+  run.
+- **Proposed**: The cashier's POS Opening Entry is submitted and Open
+  for the entire run window.
+- **Proposed**: No cleanup, retention, or staging draft state is
+  present for the cashier, profile, or items used.
+
+## One-Shot Response Drop
+
+- **Approved**: The operator issues exactly one
+  ``POST v1.sales.submit`` against staging with a fresh lowercase
+  UUID ``original_request_uuid`` recorded as ``X-Idempotency-Key``.
+- **Approved**: The request body and the cashier/profile/session
+  context are captured in a sanitized staging evidence record before
+  upstream completion.
+
+## Post-Upstream-Completion Evidence
+
+- **Approved**: After the upstream invocation returns, the operator
+  captures the response status, body, ``request_id``, and
+  ``server_time`` into the sanitized evidence record. ``replayed`` is
+  expected to be ``false`` for the original call.
+
+## Replay Run
+
+- **Approved**: The operator re-issues the same request with the
+  same ``original_request_uuid`` and an identical request body. The
+  ``X-Idempotency-Key`` is the same UUID.
+- **Approved**: The response must be byte-identical at the data layer
+  to the original response, with ``meta.replayed`` flipped to
+  ``true`` and HTTP status returned as ``200`` for the replay.
+
+## Exactly-One POS Invoice Query
+
+- **Approved**: After both calls, the operator queries
+  ``POS Invoice`` filtered by the linkage documented above. The count
+  must be exactly one document.
+- **Approved**: The POS Invoice ``status`` must be ``Paid`` and
+  ``outstanding_amount`` must equal ``0``.
+
+## Exactly-One Idempotency Row Query
+
+- **Approved**: After both calls, the operator queries
+  ``Mobile POS Request`` filtered by ``idempotency_key``. The count
+  must be exactly one record, ``status`` must be ``Completed``, and
+  the request must reference the same POS Invoice name.
+
+## No Duplicate Stock/Accounting Effect
+
+- **Inferred**: Stock and accounting are recorded through ERPNext's
+  normal POS Invoice submit path. The operator confirms the absence
+  of duplicate ``Stock Ledger Entry`` rows for the items and the
+  absence of duplicate ``Payment Ledger Entry`` rows for the payment
+  modes between the original and replay calls.
+
+## Capability Refresh Evidence
+
+- **Approved**: The operator re-reads ``Mobile POS Capability`` after
+  the replay and confirms the ``mobile_pos:sales.submit`` capability is
+  still present and unchanged. Capability refresh is owned by the
+  bootstrap endpoint, not by the response-drop run.
+
+## Receipt Reconciliation Evidence
+
+- **Approved**: The operator captures the sale detail through
+  ``GET v1.sales.get`` and verifies ``grand_total``,
+  ``paid_amount``, and ``outstanding_amount`` match the submit
+  response, and ``change_amount`` is exactly ``"0"``.
+
+## Evidence ID and Sanitized Output
+
+- **Approved**: The evidence record carries a single
+  ``evidence_id`` (a lowercase UUID generated by the operator) and
+  a sanitized output that contains no tokens, no OAuth secrets, no
+  full request bodies with personal data, and no cashier email
+  beyond the operator-captured user identity.
+
+## Credential and PII Exclusion
+
+- **Approved**: The sanitized output must not contain
+  ``Authorization`` headers, ``X-Idempotency-Key`` values, full
+  payment amount strings (only totals and a hash are permitted), or
+  Customer primary email or phone.
+
+## Cleanup
+
+- **Approved**: Cleanup never directly deletes the submitted ``POS Invoice``
+  or its ``Mobile POS Request`` row. It also never deletes ``Mobile POS
+  Capability``, the cashier user, the POS Profile, or the POS Opening Entry.
+- **Approved**: The staging sale is corrected through the applicable ERPNext
+  policy: manager cancellation when cancellation is permitted, otherwise a POS
+  Invoice return. Hard deletion and amendment are not general cleanup
+  procedures. The ``Mobile POS Request`` remains subject to the normal
+  retention and verified-correlation cleanup policy.
+
+## PASS/FAIL Criteria
+
+- **Approved PASS**:
+  - ``POS Invoice`` count for the run is exactly one.
+  - ``Mobile POS Request`` count for the run is exactly one.
+  - The replay response is byte-identical at the data layer to the
+    original response, with ``meta.replayed`` flipped to ``true``.
+  - ``outstanding_amount`` is exactly zero and ``change_amount`` is
+    exactly zero on the durable invoice.
+  - No duplicate ``Stock Ledger Entry`` or ``Payment Ledger Entry``
+    rows appear between the original and replay calls.
+  - ``Mobile POS Capability.mobile_pos:sales.submit`` remains
+    present.
+  - The sanitized evidence record contains no tokens, no secrets,
+    and no PII beyond the cashier identity.
+- **Approved FAIL**: any condition above is not satisfied. The
+  operator stops the run, captures the failure mode, and escalates
+  through the existing incident playbook.

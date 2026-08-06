@@ -20,6 +20,11 @@
 - **Proposed**: The same key must be reused until Android obtains a terminal response or explicitly abandons an action that never reached the server.
 - **Proposed**: A new attempt to perform a new business action always receives a new key, even if its payload matches an older action.
 - **Proposed**: Read-only endpoints ignore the header.
+- **Approved**: `v1.sales.quote_cart` is a read-only snapshot. It is not in
+  scope of the idempotency protocol and never creates a
+  `Mobile POS Request` row. Android may call it as often as it wishes;
+  the response is independent of any prior call and is invalidated only
+  by server-side price, stock, or profile changes.
 
 ## Server Scope and Fingerprint
 

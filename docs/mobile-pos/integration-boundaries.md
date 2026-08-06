@@ -22,6 +22,9 @@
 | Price Group | `bakery_manufacturing` | Consume the generated Price List through POS Profile | **Verified / Proposed** |
 | Batch default UOM | `bakery_manufacturing` | Use effective `scan_barcode`; do not import `resolve_batch_uom` | **Verified / Proposed** |
 | Mobile UI and local retry queue | `POSERPNext` | Persist pending idempotent requests, not ERPNext ledgers | **Proposed** |
+| Authoritative cart payable | `roti_ropi_pos` | Android must read the snapshot from `v1.sales.quote_cart`; per-item quotes never sum to a payable | **Approved** |
+| Exact sale settlement | `roti_ropi_pos` | Backend enforces `sum == payable` before insert/submit; Android never computes change | **Approved** |
+| Sale payment decimal policy | `roti_ropi_pos` | Server projects `decimal_places` from ERPNext; no client-side rounding or truncation | **Approved** |
 
 ## ERPNext Boundary
 
@@ -105,6 +108,20 @@
 - **Proposed**: Android sends an `X-Idempotency-Key` on every mutation and persists that key with its pending action until a terminal response is received.
 - **Proposed**: Android never generates ERPNext document names, posting statuses, totals, tax rows, account names, or server timestamps.
 - **Proposed**: Android may cache catalog display data, but sale submission must tolerate the server returning updated price, stock, tax, or UOM validation errors.
+- **Approved**: Android obtains both authoritative totals from
+  `v1.sales.quote_cart`. The quote is non-binding; per-item UI quotes from
+  `catalog.quote_item` are display snapshots only and must never be summed
+  into a total. Android sends the quote's `grand_total` as
+  `client_accepted_grand_total` on `v1.sales.submit` for the `PRICE_CHANGED`
+  guard, and makes the sum of payment rows equal the quote's `payable`.
+  When ERPNext rounding applies, `grand_total` and `payable` may differ.
+- **Approved**: Android validates its payment input against the
+  `payment_amount_policy` returned by `v1.sales.quote_cart`. Server-side
+  validation remains authoritative; client validation is UX assistance
+  only.
+- **Approved**: Android never computes `change`. The server enforces
+  exact settlement, so any client-side change math is a contract
+  violation.
 - **Proposed**: Android treats a close response of `queued` as pending and polls the status endpoint.
 
 ## Dependency Direction
