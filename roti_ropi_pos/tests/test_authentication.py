@@ -82,6 +82,7 @@ class TestAuthentication(IntegrationTestCase):
 				"/api/method/roti_ropi_pos.api.v1.catalog.quote_item",
 				"/api/method/roti_ropi_pos.api.v1.sales.submit",
 				"/api/method/roti_ropi_pos.api.v1.sales.quote_cart",
+				"/api/method/roti_ropi_pos.api.v1.sales.quote_return",
 				"/api/method/roti_ropi_pos.api.v1.sales.list",
 				"/api/method/roti_ropi_pos.api.v1.sales.get",
 				"/api/method/roti_ropi_pos.api.v1.sales.create_return",
@@ -95,7 +96,7 @@ class TestAuthentication(IntegrationTestCase):
 		with open(frappe.get_app_path("roti_ropi_pos", "fixtures", "custom_docperm.json")) as fixture:
 			rows = json.load(fixture)
 		cashier_rows = [row for row in rows if row["role"] == "Mobile POS Cashier"]
-		self.assertEqual(len(cashier_rows), 7)
+		self.assertEqual(len(cashier_rows), 8)
 		self.assertTrue(any(row["role"] != "Mobile POS Cashier" for row in rows))
 		self.assertEqual(
 			{row["parent"] for row in cashier_rows},
@@ -107,7 +108,13 @@ class TestAuthentication(IntegrationTestCase):
 				"POS Closing Entry",
 				"Customer",
 				"Item",
+				"Serial and Batch Bundle",
 			},
+		)
+		bundle = next(row for row in cashier_rows if row["parent"] == "Serial and Batch Bundle")
+		self.assertEqual(
+			{permission: int(bool(bundle.get(permission))) for permission in ("read", "write", "create", "submit", "cancel", "delete")},
+			{"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 0, "delete": 0},
 		)
 		account = next(row for row in cashier_rows if row["parent"] == "Account")
 		self.assertTrue(account["select"])

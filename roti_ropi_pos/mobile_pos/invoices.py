@@ -5,6 +5,7 @@ from decimal import Decimal
 import frappe
 from erpnext.accounts.doctype.pos_invoice.pos_invoice import get_stock_availability
 from erpnext.stock.get_item_details import get_conversion_factor
+from erpnext.stock.serial_batch_bundle import get_batches_from_bundle, get_serial_nos_from_bundle
 
 from roti_ropi_pos.mobile_pos.authorization import (
 	get_authorized_profile,
@@ -17,6 +18,7 @@ from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.mobile_pos.idempotency import MutationResult
 from roti_ropi_pos.mobile_pos.sessions import get_current_opening
 from roti_ropi_pos.mobile_pos.validation import (
+	return_quantity_policy,
 	sale_payment_amount_policy,
 )
 
@@ -123,6 +125,186 @@ def build_sale_quote(payload: dict) -> dict:
 		"payment_modes": _sale_payment_modes(profile),
 		"payment_amount_policy": sale_payment_amount_policy(invoice.currency),
 	}
+
+
+def build_return_quote(payload: dict) -> dict:
+	"""Calculate a selected return without writing a business or control record."""
+	source = _source_invoice_for_return(payload["source_name"])
+	profile = get_authorized_profile(source.pos_profile)
+	if not get_current_opening(profile):
+		raise MobilePOSAPIError(
+			"NO_OPEN_SESSION",
+			"No open POS session is available for this profile.",
+			status=422,
+			details={"pos_profile": profile.name},
+		)
+	require_doc_permission("POS Invoice", "create")
+	require_doc_permission("POS Invoice", "submit")
+	invoice = _mapped_return(source, payload["items"])
+	mode, allowed_modes = _select_refund_mode(profile, payload.get("refund_mode"))
+	invoice.calculate_taxes_and_totals()
+	payable = _return_payable(invoice)
+	invoice.set("payments", [])
+	invoice.append("payments", {"mode_of_payment": mode, "amount": float(payable)})
+	invoice.set_paid_amount()
+	invoice.set_account_for_mode_of_payment()
+	invoice.set_outstanding_amount()
+	source_rows = {row.name: row for row in source.items}
+	return {
+		"return_quote": {
+			"source_name": source.name,
+			"currency": invoice.currency,
+			"items": [
+				return_item_dto(row, tracking_row=source_rows.get(row.pos_invoice_item))
+				for row in invoice.items
+			],
+			"taxes": [sale_tax_dto(row) for row in invoice.taxes],
+			"discount_amount": _decimal(invoice.discount_amount),
+			"total_taxes_and_charges": _decimal(invoice.total_taxes_and_charges),
+			"grand_total": _decimal(invoice.grand_total),
+			"rounded_total": _decimal(invoice.rounded_total),
+			"refund_amount": _decimal(abs(payable)),
+			"allowed_refund_modes": [{"mode_of_payment": value} for value in allowed_modes],
+			"refund_mode_required": len(allowed_modes) > 1,
+			"selected_refund_mode": mode,
+			"refund_allocations": [
+				{"mode_of_payment": mode, "amount": _decimal(payable), "reference_no": None}
+			],
+		}
+	}
+
+
+def _mapped_return(source, requested_items: list[dict], *, remaining_by_row: dict | None = None):
+	from erpnext.accounts.doctype.pos_invoice.pos_invoice import make_sales_return
+
+	remaining_by_row = remaining_by_row or _remaining_return_quantities(source)
+	invoice = make_sales_return(source.name)
+	requested = {row["source_item_row"]: row["qty"] for row in requested_items}
+	rows = {row.pos_invoice_item: row for row in invoice.items}
+	if set(requested) - set(remaining_by_row):
+		raise _invalid_request("items", "Each source_item_row must be returnable from this sale.")
+	invoice.set("items", [])
+	for source_item_row, qty in requested.items():
+		remaining_qty = remaining_by_row[source_item_row]
+		if qty > remaining_qty:
+			raise MobilePOSAPIError(
+				"RETURN_LIMIT_EXCEEDED",
+				"The requested return quantity exceeds the remaining returnable quantity.",
+				status=422,
+				details={
+					"source_name": source.name,
+					"source_item_row": source_item_row,
+					"requested_qty": _decimal(qty),
+					"remaining_qty": _decimal(remaining_qty),
+					"refresh_endpoint": "v1.sales.get",
+				},
+			)
+		row = rows.get(source_item_row)
+		if not row:
+			raise _invalid_request("items", "Each source_item_row must be returnable from this sale.")
+		if _is_serialized_item(row.item_code) and qty != remaining_qty:
+			raise MobilePOSAPIError(
+				"INVALID_SERIAL_NUMBER",
+				"Serialized returns must include every remaining serial number for the row.",
+				status=422,
+				details={
+					"source_item_row": source_item_row,
+					"item_code": row.item_code,
+					"serial_no": None,
+					"reason": "partial_serial_return_not_supported",
+				},
+			)
+		row.qty = -float(qty)
+		invoice.append("items", row)
+	return invoice
+
+
+def _submitted_return_quantities(source_name: str, *, for_update: bool = False) -> dict[str, Decimal]:
+	# The locking form is a current read under MariaDB REPEATABLE READ. This is
+	# required after waiting on the source lock so a loser sees the winner's return.
+	rows = frappe.db.sql(
+		f"""SELECT item.pos_invoice_item, ABS(item.qty) AS returned_qty
+		FROM `tabPOS Invoice Item` item
+		INNER JOIN `tabPOS Invoice` invoice ON invoice.name = item.parent
+		WHERE invoice.return_against = %s AND invoice.is_return = 1 AND invoice.docstatus = 1
+		ORDER BY item.name{" FOR UPDATE" if for_update else ""}""",
+		source_name,
+		as_dict=True,
+	)
+	returned = {}
+	for row in rows:
+		returned[row.pos_invoice_item] = returned.get(row.pos_invoice_item, Decimal(0)) + Decimal(
+			str(row.returned_qty or 0)
+		)
+	return returned
+
+
+def _remaining_return_quantities(source, *, for_update: bool = False) -> dict[str, Decimal]:
+	returned = _submitted_return_quantities(source.name, for_update=for_update)
+	return {
+		row.name: max(abs(Decimal(str(row.qty or 0))) - returned.get(row.name, Decimal(0)), Decimal(0))
+		for row in source.items
+	}
+
+
+def _is_serialized_item(item_code: str) -> bool:
+	return bool(frappe.get_cached_value("Item", item_code, "has_serial_no"))
+
+
+def _refund_modes(profile) -> list[str]:
+	return list(
+		dict.fromkeys(
+			row.mode_of_payment
+			for row in profile.payments
+			if row.mode_of_payment
+			and row.allow_in_returns
+			and frappe.get_cached_value("Mode of Payment", row.mode_of_payment, "enabled")
+			and frappe.db.get_value(
+				"Mode of Payment Account",
+				{"parent": row.mode_of_payment, "company": profile.company},
+				"default_account",
+			)
+		)
+	)
+
+
+def _select_refund_mode(profile, requested_mode: str | None) -> tuple[str, list[str]]:
+	allowed = _refund_modes(profile)
+	if not allowed:
+		raise MobilePOSAPIError(
+			"PROFILE_CONFIGURATION_INVALID",
+			"No valid refund mode is configured for this POS Profile.",
+			status=422,
+			details={
+				"pos_profile": profile.name,
+				"field": "refund_modes",
+				"reason": "no_valid_refund_mode",
+			},
+		)
+	if len(allowed) == 1:
+		if requested_mode is not None:
+			raise _invalid_request("refund_mode", "server_selected_for_single_refund_mode")
+		return allowed[0], allowed
+	if requested_mode is None:
+		raise _invalid_request("refund_mode", "required_for_multiple_refund_modes")
+	if requested_mode not in allowed:
+		raise MobilePOSAPIError(
+			"INVALID_PAYMENT",
+			"The selected refund mode is not allowed.",
+			status=422,
+			details={
+				"mode_of_payment": requested_mode,
+				"reason": "refund_mode_not_allowed",
+				"allowed_refund_modes": allowed,
+			},
+		)
+	return requested_mode, allowed
+
+
+def _return_payable(invoice) -> Decimal:
+	rounded = Decimal(str(invoice.rounded_total or 0))
+	grand = Decimal(str(invoice.grand_total or 0))
+	return rounded if rounded else grand
 
 
 def _sale_payment_modes(profile) -> list[dict]:
@@ -285,6 +467,10 @@ def list_sales(profile, *, status: str, q: str, start: int, limit: int) -> dict:
 			"grand_total",
 			"paid_amount",
 			"change_amount",
+			"rounded_total",
+			"outstanding_amount",
+			"discount_amount",
+			"total_taxes_and_charges",
 			"posting_date",
 			"posting_time",
 		],
@@ -301,12 +487,16 @@ def list_sales(profile, *, status: str, q: str, start: int, limit: int) -> dict:
 
 def get_sale(name: str) -> dict:
 	"""Return one source-visible POS Invoice detail."""
-	return {"sale": sale_detail(_source_invoice(name))}
+	doc = _source_invoice(name)
+	profile = get_authorized_profile(doc.pos_profile)
+	return {"sale": sale_detail(doc, return_profile=profile)}
 
 
 def create_return(payload: dict, transaction_id: str) -> MutationResult:
 	"""Create a scoped POS Invoice return through ERPNext's mapper."""
 	source = _source_invoice_for_return(payload["source_name"])
+	frappe.db.get_value("POS Invoice", source.name, "name", for_update=True)
+	source.reload()
 	try:
 		profile = get_authorized_profile(source.pos_profile)
 	except MobilePOSAPIError as error:
@@ -315,53 +505,22 @@ def create_return(payload: dict, transaction_id: str) -> MutationResult:
 		raise
 	if source.company != profile.company:
 		raise _not_found()
+	if not get_current_opening(profile):
+		raise MobilePOSAPIError(
+			"NO_OPEN_SESSION",
+			"No open POS session is available for this profile.",
+			status=422,
+			details={"pos_profile": profile.name},
+		)
 	require_doc_permission("POS Invoice", "create")
 	require_doc_permission("POS Invoice", "submit")
-	from erpnext.accounts.doctype.pos_invoice.pos_invoice import make_sales_return
-
-	return_invoice = make_sales_return(source.name)
-	requested = {row["source_item_row"]: row["qty"] for row in payload["items"]}
-	rows = {row.pos_invoice_item: row for row in return_invoice.items}
-	if set(requested) - set(rows):
-		raise _invalid_request("items", "Each source_item_row must be returnable from this sale.")
-	return_invoice.set("items", [])
-	for source_item_row, qty in requested.items():
-		row = rows[source_item_row]
-		remaining_qty = abs(Decimal(str(row.qty)))
-		if qty > remaining_qty:
-			raise MobilePOSAPIError(
-				"RETURN_LIMIT_EXCEEDED",
-				"The requested return quantity exceeds the source sale.",
-				status=422,
-				details={
-					"source_item_row": source_item_row,
-					"requested_qty": _decimal(qty),
-					"remaining_qty": _decimal(remaining_qty),
-				},
-			)
-		row.qty = -float(qty)
-		return_invoice.append("items", row)
+	remaining_by_row = _remaining_return_quantities(source, for_update=True)
+	return_invoice = _mapped_return(source, payload["items"], remaining_by_row=remaining_by_row)
+	mode, _allowed_modes = _select_refund_mode(profile, payload.get("refund_mode"))
+	return_invoice.calculate_taxes_and_totals()
+	payable = _return_payable(return_invoice)
 	return_invoice.set("payments", [])
-	allowed_modes = {
-		row.mode_of_payment
-		for row in profile.payments
-		if row.allow_in_returns and frappe.get_cached_value("Mode of Payment", row.mode_of_payment, "enabled")
-	}
-	seen_modes = set()
-	for payment in payload["payments"]:
-		if payment["mode_of_payment"] not in allowed_modes:
-			raise _invalid_payment(payment["mode_of_payment"], "Payment mode is not available for returns.")
-		if payment["mode_of_payment"] in seen_modes:
-			raise _invalid_payment(payment["mode_of_payment"], "Payment mode is duplicated.")
-		seen_modes.add(payment["mode_of_payment"])
-		return_invoice.append(
-			"payments",
-			{
-				"mode_of_payment": payment["mode_of_payment"],
-				"amount": float(payment["amount"]),
-				"reference_no": payment["reference_no"],
-			},
-		)
+	return_invoice.append("payments", {"mode_of_payment": mode, "amount": float(payable)})
 	return_reason = f"Mobile POS Return Reason: {payload['reason']}"
 	return_invoice.remarks = "\n".join(
 		dict.fromkeys(
@@ -373,16 +532,15 @@ def create_return(payload: dict, transaction_id: str) -> MutationResult:
 		)
 	)
 	return_invoice.custom_mobile_pos_transaction_id = transaction_id
-	return_invoice.calculate_taxes_and_totals()
 	return_invoice.set_paid_amount()
 	return_invoice.set_account_for_mode_of_payment()
 	return_invoice.set_outstanding_amount()
-	if Decimal(str(return_invoice.paid_amount)) != Decimal(str(return_invoice.grand_total)):
+	if Decimal(str(return_invoice.paid_amount)) != payable:
 		raise _invalid_payment(None, "Return payments must exactly settle the return.")
 	return_invoice.insert()
 	return_invoice.submit()
 	return MutationResult(
-		data={"return_sale": sale_detail(return_invoice)},
+		data={"return_sale": sale_detail(return_invoice, return_reason=payload["reason"])},
 		reference_doctype="POS Invoice",
 		reference_name=return_invoice.name,
 	)
@@ -648,15 +806,26 @@ def sale_summary(doc) -> dict:
 		"grand_total": _decimal(doc.grand_total),
 		"paid_amount": _decimal(doc.paid_amount),
 		"change_amount": _decimal(doc.change_amount),
+		"rounded_total": _decimal(doc.rounded_total),
+		"outstanding_amount": _decimal(doc.outstanding_amount),
+		"discount_amount": _decimal(doc.discount_amount),
+		"total_taxes_and_charges": _decimal(doc.total_taxes_and_charges),
 		"posting_date": str(doc.posting_date),
 		"posting_time": _time(doc.posting_time),
 	}
 
 
-def sale_detail(doc) -> dict:
-	return {
+def sale_detail(doc, *, return_profile=None, return_reason: str | None = None) -> dict:
+	projection = _return_projection(doc, return_profile) if return_profile else None
+	detail = {
 		"summary": sale_summary(doc),
-		"items": [sale_item_dto(row) for row in doc.items],
+		"items": [
+			{
+				**sale_item_dto(row),
+				**({"returnability": projection["rows"][row.name]} if projection else {}),
+			}
+			for row in doc.items
+		],
 		"taxes": [sale_tax_dto(row) for row in doc.taxes],
 		"payments": [
 			{
@@ -667,6 +836,77 @@ def sale_detail(doc) -> dict:
 			for row in doc.payments
 		],
 	}
+	if projection:
+		detail["return_contract"] = projection["contract"]
+	if doc.is_return:
+		payable = _return_payable(doc)
+		detail["items"] = [return_item_dto(row) for row in doc.items]
+		detail.update(
+			{
+				"return_against": doc.return_against,
+				"return_reason": return_reason,
+				"refund_amount": _decimal(abs(payable)),
+				"refund_allocations": detail["payments"],
+			}
+		)
+	return detail
+
+
+def _return_projection(doc, profile) -> dict:
+	allowed_mode_names = _refund_modes(profile)
+	returned = _submitted_return_quantities(doc.name)
+	rows = {}
+	for row in doc.items:
+		original = Decimal(str(row.qty or 0))
+		returned_qty = returned.get(row.name, Decimal(0))
+		remaining = max(original - returned_qty, Decimal(0))
+		batch_numbers, serial_numbers = _serial_batch_references(row)
+		tracking = frappe.get_cached_value(
+			"Item", row.item_code, ["has_batch_no", "has_serial_no"], as_dict=True
+		)
+		if doc.docstatus != 1 or doc.is_return:
+			rejection_reason = "SOURCE_NOT_RETURNABLE"
+		elif remaining <= 0:
+			rejection_reason = "RETURN_LIMIT_REACHED"
+		elif not allowed_mode_names:
+			rejection_reason = "NO_VALID_REFUND_MODE"
+		elif (tracking.has_batch_no and not batch_numbers) or (
+			tracking.has_serial_no and not serial_numbers
+		):
+			rejection_reason = "SERIAL_BATCH_REFERENCE_UNAVAILABLE"
+		else:
+			rejection_reason = None
+		rows[row.name] = {
+			"original_row_id": row.name,
+			"item_code": row.item_code,
+			"original_qty": _decimal(original),
+			"returned_qty": _decimal(returned_qty),
+			"remaining_qty": _decimal(remaining),
+			"uom": row.uom,
+			"batch_numbers": batch_numbers,
+			"serial_numbers": serial_numbers,
+			"eligible": rejection_reason is None,
+			"rejection_reason": rejection_reason,
+		}
+	allowed_modes = [{"mode_of_payment": mode} for mode in allowed_mode_names]
+	return {
+		"rows": rows,
+		"contract": {
+			"quantity_policy": return_quantity_policy(),
+			"allowed_refund_modes": allowed_modes,
+			"refund_mode_required": len(allowed_modes) > 1,
+		},
+	}
+
+
+def _serial_batch_references(row) -> tuple[list[str], list[str]]:
+	batches = [row.batch_no] if row.batch_no else []
+	serials = [value for value in (row.serial_no or "").split("\n") if value]
+	bundle = row.get("serial_and_batch_bundle")
+	if bundle:
+		batches.extend(get_batches_from_bundle(bundle).keys())
+		serials.extend(get_serial_nos_from_bundle(bundle))
+	return list(dict.fromkeys(batches)), list(dict.fromkeys(serials))
 
 
 def sale_item_dto(row) -> dict:
@@ -682,6 +922,13 @@ def sale_item_dto(row) -> dict:
 		"batch_no": row.batch_no or None,
 		"serial_numbers": [value for value in (row.serial_no or "").split("\n") if value],
 	}
+
+
+def return_item_dto(row, *, tracking_row=None) -> dict:
+	dto = sale_item_dto(row)
+	batches, serials = _serial_batch_references(tracking_row or row)
+	dto.update({"batch_numbers": batches, "serial_numbers": serials})
+	return dto
 
 
 def sale_tax_dto(row) -> dict:

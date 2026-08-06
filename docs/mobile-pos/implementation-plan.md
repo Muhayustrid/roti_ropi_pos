@@ -43,7 +43,7 @@
 - **Approved**: Cashiers use only `Mobile POS Cashier` plus exact Custom DocPerm fixtures; Sales Manager and broad accounting/administrative roles are not required.
 - **Approved**: Registered-customer selection and default walk-in Customer are supported without Customer auto-creation. Submitted sales must be fully settled, and idempotency terminal retention is 90 days.
 - **Approved**: V1 has no health endpoint. Adding one requires explicit approval as a new backend contract and task.
-- **Approved**: V1 has no return-preview endpoint. Adding one requires explicit approval as a new backend contract and task.
+- **Approved**: Backend Task 10 adds read-only `sales.quote_return`; Android must treat it as a non-binding server calculation and create-return must recalculate.
 - **Approved**: The MVP has no maximum shift-duration policy.
 - **Approved**: This plan contains backend tasks only. Android remains blocked until a separate plan is approved at `/Users/rotiropi/DockerERPNext/POSERPNext/docs/mobile-pos/implementation-plan.md`.
 - **Approved**: Completing this plan does not by itself complete Mobile POS delivery.

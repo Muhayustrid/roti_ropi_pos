@@ -36,7 +36,7 @@
 - **Proposed**: Do not modify files under `apps/erpnext` or `apps/frappe`.
 - **Proposed**: Do not include the approved Price Group sidebar migration in Mobile POS implementation work.
 - **Approved**: V1 has no health endpoint. Adding one requires an explicitly approved backend contract and task.
-- **Approved**: V1 has no return-preview endpoint. Cashier correction uses the existing `sales.create_return` contract; adding preview requires an explicitly approved backend contract and task.
+- **Approved**: V1 exposes read-only `sales.quote_return` so Android can display server-calculated return accounting before the idempotent `sales.create_return` mutation.
 - **Approved**: The MVP has no maximum shift-duration policy. A manager policy may be designed later, but it requires separate approval and must not be inferred from a calendar-day boundary.
 
 ## System Boundaries
@@ -120,7 +120,7 @@ flowchart LR
 
 ### Return and Correction
 
-- **Proposed**: Returns use ERPNext's mapped return document and submit a negative POS Invoice after core quantity/payment validation.
+- **Approved**: Returns use ERPNext's mapped document under an original-invoice lock. The backend owns cumulative limits, rates, taxes, discounts, rounding, refund total, payment rows, accounts, and allocation; Android sends no accounting value.
 - **Approved**: Mobile cancellation is outside the cashier MVP. Completed sales are corrected with returns; manager cancellation remains an ERPNext Desk operation until a separate manager policy is approved.
 
 ### Close Session

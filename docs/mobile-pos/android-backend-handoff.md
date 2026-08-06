@@ -154,12 +154,13 @@ Authentication, route-hook, malformed-route, rate-limit, and some server failure
 | POST | `sales.submit` | Send accepted total, item identities/selections, and payments. Server rebuilds authoritative invoice. |
 | GET | `sales.get` | Read scoped POS Invoice detail by `name`. |
 | GET | `sales.list` | Read scoped history by profile/status/query/pagination. |
-| POST | `sales.create_return` | Send source POS Invoice, reason, source row IDs, quantities, and negative refund payments. |
+| POST | `sales.quote_return` | Preview server-calculated return totals and refund allocation; no idempotency key or artifacts. |
+| POST | `sales.create_return` | Send source POS Invoice, reason, source row IDs, quantities, and conditional allowed refund mode only. |
 | GET | `closing.preview` | Load server-derived opening, invoice count, total, and expected payments. |
 | POST | `closing.submit` | Send profile and counted closing balances. |
 | GET | `closing.status` | Poll scoped closing by `name` while status is `queued`. |
 
-No v1 health, cancellation, Customer mutation, return-preview, closing-retry, upload, generic resource, Desk, or generic RPC endpoint exists.
+No v1 health, cancellation, Customer mutation, closing-retry, upload, generic resource, Desk, or generic RPC endpoint exists.
 
 ## Critical Request Shapes
 
@@ -190,7 +191,26 @@ Response data contains `sale: SaleDetail`. Client total is only an acceptance ch
 
 ### Return
 
-Get `source_item_row` from `sales.get` response at `sale.items[].row_id`:
+Refresh `sales.get` immediately before selection and use only rows whose
+`sale.items[].returnability.eligible` is true. Display the server's
+`original_qty`, `returned_qty`, `remaining_qty`, UOM, and serial/batch
+references; never derive remaining quantity from history.
+
+Quote request when the server exposes one allowed mode (omit `refund_mode`):
+
+```json
+{
+  "source_name": "ACC-PSINV-2026-00001",
+  "items": [
+    {"source_item_row": "row-id-1", "qty": "1"}
+  ]
+}
+```
+
+Send this body to `sales.quote_return`. For `sales.create_return`, add required
+`reason` to the same selection. If `refund_mode_required` is true,
+include exactly one `refund_mode` from `allowed_refund_modes`; otherwise omit
+it. The quote is non-binding and create recalculates under a source lock.
 
 ```json
 {
@@ -198,14 +218,21 @@ Get `source_item_row` from `sales.get` response at `sale.items[].row_id`:
   "reason": "Customer returned one pack",
   "items": [
     {"source_item_row": "row-id-1", "qty": "1"}
-  ],
-  "payments": [
-    {"mode_of_payment": "Cash", "amount": "-30000", "reference_no": null}
   ]
 }
 ```
 
-Response data contains `return_sale: SaleDetail`. Returns use ERPNext mapping and enforce remaining return quantity. V1 does not cancel sales.
+Android never sends refund amount, payment allocation, account, rate, tax,
+discount, rounding, or other accounting values. Response data contains
+receipt-ready `return_sale: SaleDetail`, including the durable return reference,
+authoritative totals, positive `refund_amount`, and negative
+`refund_allocations`. Return receipt items include bundle-aware `batch_numbers`
+and `serial_numbers`. On `RETURN_LIMIT_EXCEEDED`, discard cached availability
+and refresh `sales.get`. V1 does not cancel sales.
+
+The backend exposes only refund modes that are enabled, return-enabled on the
+source profile, and backed by a default account for that Company. No valid mode
+returns `PROFILE_CONFIGURATION_INVALID` without creating an invoice or request.
 
 ### Closing
 
@@ -249,6 +276,10 @@ Persist each pending mutation's normalized body, idempotency UUID, operation, an
 - Replay success returns HTTP 200 and `meta.replayed = true`.
 
 Server scopes idempotency by cashier, operation, and key. Terminal records are retained for 90 days.
+For `sales.create_return`, the persisted body and replay must also preserve the
+conditional `refund_mode` field exactly. A response-drop retry uses the same
+UUID and exact request bytes; a corrected return is a new logical action with a
+new UUID.
 
 ## Android Boundaries
 

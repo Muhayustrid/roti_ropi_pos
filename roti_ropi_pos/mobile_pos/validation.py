@@ -71,6 +71,38 @@ def opening_amount_string(
 _SIGNED_DECIMAL_SYNTAX = re.compile(r"\A-?[0-9]+(?:\.[0-9]+)?\Z")
 
 
+def return_quantity_policy() -> dict:
+	decimal_places = min(max(int(frappe.db.get_default("float_precision") or 3), 0), 9)
+	minimum = "1" if decimal_places == 0 else f"0.{('0' * (decimal_places - 1))}1"
+	maximum = "999999999999" + (f".{('9' * decimal_places)}" if decimal_places else "")
+	return {
+		"decimal_places": decimal_places,
+		"minimum": minimum,
+		"maximum": maximum,
+		"api_syntax": "ascii_decimal_dot",
+		"rounding": "reject",
+		"policy_version": "return-quantity/v1",
+	}
+
+
+def return_quantity_string(value: Any) -> Decimal:
+	parsed = decimal_string(value, field="qty")
+	policy = return_quantity_policy()
+	if len(value.partition(".")[2]) > policy["decimal_places"]:
+		raise MobilePOSAPIError(
+			"INVALID_REQUEST",
+			"qty must be a decimal string.",
+			details={"field": "qty", "reason": "excessive_scale"},
+		)
+	if parsed > Decimal(policy["maximum"]):
+		raise MobilePOSAPIError(
+			"INVALID_REQUEST",
+			"qty must be a decimal string.",
+			details={"field": "qty", "reason": "exceeds_maximum"},
+		)
+	return parsed
+
+
 def decimal_string(
 	value: Any,
 	*,

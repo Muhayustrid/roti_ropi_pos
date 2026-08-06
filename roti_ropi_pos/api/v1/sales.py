@@ -9,7 +9,7 @@ from roti_ropi_pos.api.v1.bootstrap import mobile_pos_endpoint
 from roti_ropi_pos.mobile_pos.authorization import get_authorized_profile
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.mobile_pos.idempotency import execute_idempotent
-from roti_ropi_pos.mobile_pos.invoices import build_sale_quote, submit_sale
+from roti_ropi_pos.mobile_pos.invoices import build_return_quote, build_sale_quote, submit_sale
 from roti_ropi_pos.mobile_pos.invoices import create_return as create_return_service
 from roti_ropi_pos.mobile_pos.invoices import get_sale as get_sale_service
 from roti_ropi_pos.mobile_pos.invoices import list_sales as list_sales_service
@@ -17,6 +17,7 @@ from roti_ropi_pos.mobile_pos.responses import success
 from roti_ropi_pos.mobile_pos.validation import (
 	decimal_string,
 	require_json_object,
+	return_quantity_string,
 	sale_payment_amount_string,
 )
 
@@ -87,6 +88,13 @@ def get(name=None) -> dict:
 	if not isinstance(name, str) or not name.strip():
 		raise _invalid("name", "Expected a POS Invoice name.")
 	return success(get_sale_service(name.strip()))
+
+
+@frappe.whitelist(methods=["POST"])
+@mobile_pos_endpoint
+def quote_return(**kwargs) -> dict:
+	"""Return a non-binding server-authoritative return calculation."""
+	return success(build_return_quote(_parse_return_quote_payload(dict(frappe.form_dict))))
 
 
 @frappe.whitelist(methods=["POST"])
@@ -186,12 +194,22 @@ def _parse_quote_payload(value) -> dict:
 	}
 
 
-def _parse_return_payload(value, *, currency: str | None = None) -> dict:
+def _parse_return_payload(value) -> dict:
 	value.pop("cmd", None)
 	payload = require_json_object(value, field="payload")
-	_unknown(payload, {"source_name", "reason", "items", "payments"})
+	_unknown(payload, {"source_name", "reason", "items", "refund_mode"})
 	reason = _name(payload.get("reason"), "reason", "Expected a non-empty return reason.")
-	items = payload.get("items")
+	return {
+		"source_name": _name(payload.get("source_name"), "source_name", "Expected a POS Invoice name."),
+		"reason": reason,
+		"items": _parse_return_items(payload.get("items")),
+		"refund_mode": _optional_name(
+			payload.get("refund_mode"), "refund_mode", "Expected a Mode of Payment name or null."
+		),
+	}
+
+
+def _parse_return_items(items) -> list[dict]:
 	if not isinstance(items, builtins.list) or not items:
 		raise _invalid("items", "Expected a non-empty array of items.")
 	parsed_items = []
@@ -206,21 +224,25 @@ def _parse_return_payload(value, *, currency: str | None = None) -> dict:
 					"source_item_row",
 					"Expected a POS Invoice Item row ID.",
 				),
-				"qty": _positive_decimal(row.get("qty"), "qty"),
+				"qty": return_quantity_string(row.get("qty")),
 			}
 		)
 	if len({row["source_item_row"] for row in parsed_items}) != len(parsed_items):
 		raise _invalid("items", "Duplicate source_item_row values are not accepted.")
+	return parsed_items
+
+
+def _parse_return_quote_payload(value) -> dict:
+	value.pop("cmd", None)
+	payload = require_json_object(value, field="payload")
+	_unknown(payload, {"source_name", "items", "refund_mode"})
 	return {
 		"source_name": _name(payload.get("source_name"), "source_name", "Expected a POS Invoice name."),
-		"reason": reason,
-		"items": parsed_items,
-		"payments": _return_payments(payload.get("payments"), currency=currency),
+		"items": _parse_return_items(payload.get("items")),
+		"refund_mode": _optional_name(
+			payload.get("refund_mode"), "refund_mode", "Expected a Mode of Payment name or null."
+		),
 	}
-
-
-def _return_payments(value, *, currency: str | None = None) -> list[dict]:
-	return _payments(value, positive=False, currency=currency)
 
 
 def _items(value) -> list[dict]:
