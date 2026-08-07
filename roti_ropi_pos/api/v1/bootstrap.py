@@ -15,7 +15,7 @@ from roti_ropi_pos.mobile_pos.authorization import (
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.mobile_pos.profiles import list_assigned_profiles, profile_dto
 from roti_ropi_pos.mobile_pos.responses import api_endpoint, success
-from roti_ropi_pos.mobile_pos.sessions import get_current_opening, opening_dto
+from roti_ropi_pos.mobile_pos.sessions import closing_projection, get_current_opening, opening_dto
 
 
 def mobile_pos_endpoint(func: Callable[..., dict]) -> Callable[..., dict]:
@@ -75,6 +75,7 @@ def get(pos_profile: str | None = None) -> dict:
 			"profiles": [profile_dto(p) for p in profiles],
 			"selected_profile": profile_dto(selected) if selected else None,
 			"opening_session": opening_dto(opening) if opening else None,
+			"closing": closing_projection(opening),
 			"capabilities": get_capabilities(selected, opening),
 			"pos_mode": "POS Invoice",
 		}

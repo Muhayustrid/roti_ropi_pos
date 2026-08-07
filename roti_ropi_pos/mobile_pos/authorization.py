@@ -107,15 +107,24 @@ def get_capabilities(profile=None, opening=None) -> dict:
 	}
 	if not profile:
 		return capabilities
-	from roti_ropi_pos.mobile_pos.sessions import get_current_opening
+	from roti_ropi_pos.mobile_pos.sessions import get_current_opening, has_unresolved_closing
 
 	if opening is None:
 		opening = get_current_opening(profile)
 	active = bool(opening)
-	capabilities["open_session"] = not active and _can("POS Opening Entry", ("create", "submit"))
-	capabilities["submit_sale"] = active and _can("POS Invoice", ("create", "submit"))
-	capabilities["create_return"] = active and _can("POS Invoice", ("read", "create", "submit"))
-	capabilities["close_session"] = active and _can("POS Closing Entry", ("create", "submit"))
+	unresolved_closing = has_unresolved_closing(opening)
+	capabilities["open_session"] = (
+		not active and not unresolved_closing and _can("POS Opening Entry", ("create", "submit"))
+	)
+	capabilities["submit_sale"] = (
+		active and not unresolved_closing and _can("POS Invoice", ("create", "submit"))
+	)
+	capabilities["create_return"] = (
+		active and not unresolved_closing and _can("POS Invoice", ("read", "create", "submit"))
+	)
+	capabilities["close_session"] = (
+		active and not unresolved_closing and _can("POS Closing Entry", ("create", "submit"))
+	)
 	return capabilities
 
 

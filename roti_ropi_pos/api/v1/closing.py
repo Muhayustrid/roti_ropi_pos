@@ -7,14 +7,14 @@ from roti_ropi_pos.mobile_pos.authorization import get_authorized_profile, requi
 from roti_ropi_pos.mobile_pos.closing import closing_status, execute_closing_submit, preview_closing
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.mobile_pos.responses import success
-from roti_ropi_pos.mobile_pos.validation import decimal_string, require_json_object
+from roti_ropi_pos.mobile_pos.validation import require_json_object
 
 
 @frappe.whitelist(methods=["GET"])
 @mobile_pos_endpoint
 def preview(pos_profile=None) -> dict:
 	"""Return server-derived closing preview for the current session."""
-	if not isinstance(pos_profile, str) or not pos_profile.strip():
+	if not isinstance(pos_profile, str) or not pos_profile or pos_profile != pos_profile.strip():
 		raise MobilePOSAPIError(
 			"INVALID_REQUEST",
 			"pos_profile is invalid.",
@@ -51,7 +51,7 @@ def status(name=None) -> dict:
 def _parse_closing_payload(value: dict) -> dict:
 	value.pop("cmd", None)
 	payload = require_json_object(value, field="payload")
-	_unknown(payload, {"pos_profile", "closing_balances"})
+	_unknown(payload, {"pos_profile", "preview_id", "closing_balances"})
 	pos_profile = payload.get("pos_profile")
 	if not isinstance(pos_profile, str) or not pos_profile.strip():
 		raise MobilePOSAPIError(
@@ -59,12 +59,19 @@ def _parse_closing_payload(value: dict) -> dict:
 			"pos_profile is invalid.",
 			details={"field": "pos_profile", "reason": "Expected a POS Profile name."},
 		)
+	preview_id = payload.get("preview_id")
+	if not isinstance(preview_id, str) or not preview_id:
+		raise MobilePOSAPIError(
+			"INVALID_REQUEST",
+			"preview_id is invalid.",
+			details={"field": "preview_id", "reason": "Expected a Closing preview identity."},
+		)
 	balances = payload.get("closing_balances")
-	if not isinstance(balances, list) or not balances:
+	if not isinstance(balances, list):
 		raise MobilePOSAPIError(
 			"INVALID_REQUEST",
 			"closing_balances is invalid.",
-			details={"field": "closing_balances", "reason": "Expected a non-empty array."},
+			details={"field": "closing_balances", "reason": "Expected an array."},
 		)
 	parsed_balances = []
 	for row in balances:
@@ -76,20 +83,17 @@ def _parse_closing_payload(value: dict) -> dict:
 			)
 		_unknown(row, {"mode_of_payment", "closing_amount"})
 		mop = row.get("mode_of_payment")
-		if not isinstance(mop, str) or not mop.strip():
+		if not isinstance(mop, str) or not mop or mop != mop.strip():
 			raise MobilePOSAPIError(
 				"INVALID_REQUEST",
 				"mode_of_payment is invalid.",
 				details={"field": "mode_of_payment", "reason": "Expected a payment mode name."},
 			)
-		amount = decimal_string(
-			row.get("closing_amount"),
-			field="closing_amount",
-			allow_zero=True,
-		)
-		parsed_balances.append({"mode_of_payment": mop.strip(), "closing_amount": amount})
+		amount = row.get("closing_amount")
+		parsed_balances.append({"mode_of_payment": mop, "closing_amount": amount})
 	return {
-		"pos_profile": pos_profile.strip(),
+		"pos_profile": pos_profile,
+		"preview_id": preview_id,
 		"closing_balances": parsed_balances,
 	}
 

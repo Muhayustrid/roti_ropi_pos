@@ -200,18 +200,18 @@ def complete_request(
 	request.save(ignore_permissions=True)
 
 
-def reject_request(request, error: MobilePOSAPIError, *, reference_name: str) -> dict:
+def reject_request(request, error: MobilePOSAPIError, *, reference_name: str | None = None) -> dict:
 	now = now_datetime()
 	request_id = frappe.generate_hash(length=26)
 	response = error_envelope(error, request_id, now.astimezone().isoformat())
 	request.status = "Rejected"
-	request.reference_doctype = "POS Closing Entry"
+	request.reference_doctype = "POS Closing Entry" if reference_name else None
 	request.reference_name = reference_name
 	request.http_status = error.status
 	request.response_json = frappe.as_json(response)
 	request.resolved_at = now
 	request.expires_at = now + timedelta(days=RETENTION_DAYS)
-	request.audit_reference_written = 1
+	request.audit_reference_written = 1 if reference_name else 0
 	request.lease_expires_at = None
 	request.phase = None
 	request.flags.ignore_links = True

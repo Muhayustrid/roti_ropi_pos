@@ -7,7 +7,12 @@ from roti_ropi_pos.mobile_pos.authorization import get_authorized_profile
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.mobile_pos.idempotency import execute_idempotent
 from roti_ropi_pos.mobile_pos.responses import success
-from roti_ropi_pos.mobile_pos.sessions import get_current_opening, open_session, opening_dto
+from roti_ropi_pos.mobile_pos.sessions import (
+	closing_projection,
+	get_current_opening,
+	open_session,
+	opening_dto,
+)
 from roti_ropi_pos.mobile_pos.validation import require_json_object
 
 
@@ -19,7 +24,12 @@ def current(pos_profile: str | None = None) -> dict:
 		raise _invalid("pos_profile", "Expected a POS Profile name.")
 	profile = get_authorized_profile(pos_profile)
 	opening = get_current_opening(profile)
-	return success({"opening_session": opening_dto(opening) if opening else None})
+	return success(
+		{
+			"opening_session": opening_dto(opening) if opening else None,
+			"closing": closing_projection(opening),
+		}
+	)
 
 
 @frappe.whitelist(methods=["POST"])

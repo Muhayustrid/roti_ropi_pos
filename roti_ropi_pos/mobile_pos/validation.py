@@ -332,3 +332,74 @@ def _decimal_places_from_fraction_units(fraction_units: int) -> int:
 	if remainder != 1:
 		return 2
 	return places
+
+
+def closing_counted_amount_policy(company: str) -> dict:
+	"""Return the exact input and storage policy for Closing counted amounts."""
+	currency = frappe.db.get_value("Company", company, "default_currency")
+	column_type = frappe.db.get_column_type("POS Closing Entry Detail", "closing_amount") or ""
+	match = re.fullmatch(r"decimal\((\d+),(\d+)\)", column_type.lower())
+	if not currency or not match:
+		raise MobilePOSAPIError(
+			"PROFILE_CONFIGURATION_INVALID",
+			"Closing amount storage configuration is invalid.",
+			status=422,
+			details={"field": "closing_amount", "reason": "Invalid database capacity."},
+		)
+	precision, storage_scale = map(int, match.groups())
+	decimal_places = frappe_get_currency_precision(currency)
+	max_scale = min(decimal_places, storage_scale)
+	integer_digits = precision - storage_scale
+	maximum = ("9" * integer_digits) + (f".{('9' * max_scale)}" if max_scale else "")
+	return {
+		"currency": currency,
+		"decimal_places": decimal_places,
+		"max_scale": max_scale,
+		"api_syntax": "ascii_decimal_dot",
+		"minimum": f"{Decimal(0):.{max_scale}f}",
+		"maximum": maximum,
+		"rounding": "reject",
+		"policy_version": "closing-counted-amount/v1",
+	}
+
+
+def closing_counted_amount_string(value: Any, *, policy: dict, mode_of_payment: str) -> str:
+	"""Validate the original Closing amount string without rounding or normalization."""
+	details = {
+		"field": "closing_amount",
+		"mode_of_payment": mode_of_payment,
+		"policy_version": policy["policy_version"],
+	}
+	if not isinstance(value, str) or not _DECIMAL_SYNTAX.fullmatch(value):
+		if isinstance(value, str) and value.startswith("-") and _DECIMAL_SYNTAX.fullmatch(value[1:]):
+			details.update(reason="below_minimum", minimum=policy["minimum"])
+			raise MobilePOSAPIError(
+				"CLOSING_AMOUNT_OUT_OF_BOUNDS",
+				"Closing amount is outside the allowed range.",
+				status=422,
+				details=details,
+			)
+		details["reason"] = "malformed_decimal"
+		raise MobilePOSAPIError(
+			"CLOSING_DECIMAL_MALFORMED",
+			"Closing amount must use ASCII decimal-dot syntax.",
+			status=422,
+			details=details,
+		)
+	if len(value.partition(".")[2]) > policy["max_scale"]:
+		details.update(reason="excessive_scale", max_scale=policy["max_scale"])
+		raise MobilePOSAPIError(
+			"CLOSING_DECIMAL_SCALE_EXCEEDED",
+			"Closing amount has too many fractional digits.",
+			status=422,
+			details=details,
+		)
+	if Decimal(value) > Decimal(policy["maximum"]):
+		details.update(reason="above_maximum", maximum=policy["maximum"])
+		raise MobilePOSAPIError(
+			"CLOSING_AMOUNT_OUT_OF_BOUNDS",
+			"Closing amount is outside the allowed range.",
+			status=422,
+			details=details,
+		)
+	return value

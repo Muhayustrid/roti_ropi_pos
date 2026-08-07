@@ -28,7 +28,6 @@ def get_current_opening(profile):
 			"company": profile.company,
 			"docstatus": 1,
 			"status": "Open",
-			"pos_closing_entry": ["is", "not set"],
 		},
 		"name",
 		order_by="period_start_date desc",
@@ -167,12 +166,15 @@ def opening_dto(doc) -> dict:
 				},
 			}
 		)
+	closing = closing_projection(doc)
 	return {
 		"name": doc.name,
 		"pos_profile": doc.pos_profile,
 		"company": doc.company,
 		"user": doc.user,
 		"status": "open",
+		"lifecycle_state": _opening_lifecycle(closing),
+		"closing": closing,
 		"posting_date": str(doc.posting_date),
 		"period_start_date": _iso(doc.period_start_date),
 		"opening_balances": [
@@ -184,6 +186,61 @@ def opening_dto(doc) -> dict:
 		],
 		"warnings": warnings,
 	}
+
+
+def closing_projection(opening=None) -> dict | None:
+	"""Project an unresolved Closing that blocks cashier mutations."""
+	closing_name = getattr(opening, "pos_closing_entry", None) if opening else None
+	if not closing_name:
+		request = frappe.db.get_value(
+			"Mobile POS Request",
+			{"user": frappe.session.user, "endpoint": "v1.closing.submit", "status": "Processing"},
+			["reference_name", "phase"],
+			as_dict=True,
+			order_by="creation desc",
+		)
+		if not request:
+			return None
+		closing_name = request.reference_name
+		if not closing_name:
+			return {
+				"name": None,
+				"status": "processing",
+				"phase": request.phase or "Reserved",
+				"status_endpoint": None,
+				"failure": None,
+			}
+	closing = frappe.get_doc("POS Closing Entry", closing_name)
+	status = (closing.status or "Draft").lower()
+	return {
+		"name": closing.name,
+		"status": status,
+		"phase": None,
+		"status_endpoint": "v1.closing.status",
+		"failure": (
+			{
+				"code": "CLOSING_FAILED",
+				"message": "Closing failed. A manager must review it in ERPNext.",
+			}
+			if status == "failed"
+			else None
+		),
+	}
+
+
+def has_unresolved_closing(opening=None) -> bool:
+	projection = closing_projection(opening)
+	return bool(projection and projection["status"] in {"processing", "draft", "queued", "failed"})
+
+
+def _opening_lifecycle(closing: dict | None) -> str:
+	if not closing:
+		return "active"
+	if closing["status"] == "failed":
+		return "closing_failed"
+	if closing["status"] in {"processing", "draft", "queued"}:
+		return "closing_in_progress"
+	return "active"
 
 
 def _iso(value) -> str:
