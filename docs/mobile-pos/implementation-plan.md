@@ -1104,7 +1104,7 @@ Review the intended diff, report the proposed English commit message `feat: add 
 
 #### Android Task 11 Backend Prerequisite Closure
 
-**Status:** In verification; not committed or staged on Android.
+**Status:** **Complete** ✅ (`feat(mobile-pos): harden closing contract and recovery` — commit `0a946cf`). Android remains unchanged.
 
 The additive v1 Closing contract now requires a server-owned `closing-preview/v1`
 identity, exposes `closing-counted-amount/v1`, requires the exact preview payment
