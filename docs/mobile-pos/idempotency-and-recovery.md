@@ -150,6 +150,15 @@ def execute_idempotent(
 - **Proposed**: The submit replay returns the stored initial state. Android calls `closing.status` to obtain current consolidation state.
 - **Proposed**: A rejected replay returns its stored stable error with HTTP status and `meta.replayed = true`.
 
+### Task 11 Closing binding and lifecycle additions
+
+- **Approved**: Validation for a first-use Closing key occurs before reserving a `Mobile POS Request`: the server requires the current `preview_id`, exact preview payment-mode set, and valid original counted-amount strings. Ordinary stale/decimal/payment-set rejection creates neither a Closing Entry nor a request artifact.
+- **Approved**: The Closing request hash preserves every original accepted counted-amount string. Thus `"1.0"` and `"1.00"` are different Closing bodies even though their numeric values are equal. Android response-drop replay uses the same lowercase UUID and exact serialized body bytes.
+- **Approved**: A race after durable reservation is revalidated under the Opening lock. If state changed, the Closing-specific executor may store one terminal `Rejected` request without a business reference; it creates no Closing Entry.
+- **Approved**: The server-owned preview digest is not an idempotency key. It binds the reviewed Opening/profile/cashier/invoice/payment snapshot; Android generates only the mutation UUID.
+- **Approved**: A `queued` submit response is accepted but nonterminal. Submit replay continues to return that stored initial response, while `closing.status` returns the current authoritative receipt.
+- **Approved**: While a request is `Processing`, or its Closing is Draft/Queued/Failed, session/bootstrap projection blocks opening, sales, returns, and another Closing. A submitted Closing closes the original Opening and may enable a user-initiated new Opening. A failed Closing leaves the original Opening blocked; manager cancellation restores it according to persisted ERPNext state.
+
 ## Endpoint-Specific Recovery
 
 ### Open Session

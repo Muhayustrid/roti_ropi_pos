@@ -133,8 +133,13 @@
 
 ### Closing
 
-- **Proposed**: Preview totals match the invoice/payment set and include opening balances.
-- **Proposed**: Submit rejects stale, closed, mismatched, duplicated, or foreign-user invoices.
+- **Approved**: Preview proves the Opening/profile/cashier binding, stable preview identity, invoice count and authoritative totals, exact profile payment-mode set, Opening/expected amounts, and counted-amount policy.
+- **Approved**: New invoices, changed payment snapshots, replacement Openings, changed profiles/payment modes, and stale-body replay return `CLOSING_PREVIEW_STALE` without a Closing artifact.
+- **Approved**: Decimal tests cover zero, maximum scale, `.5`, `1.`, comma, exponent, whitespace, plus/minus, excessive scale, storage overflow, and no rounding. Payment-set tests cover exact, duplicate, missing, extra, and unknown modes.
+- **Approved**: Persisted Closing rows and terminal receipts prove server-derived opening/expected/counted/difference values, invoice count, grand/net/tax/quantity totals, and status replay equality.
+- **Approved**: Recovery tests prove exact-body hashing, same-key replay, Draft resume, response loss after commit, queued-to-terminal polling, one request, one Closing, and distinct-key serialization on one Opening.
+- **Approved**: Session/bootstrap tests prove active, processing/queued, submitted, failed, and manager-cancelled lifecycle projections; `open_session` is never advertised while Closing is unresolved.
+- **Proposed**: Submit rejects closed, mismatched, duplicated, or foreign-user invoices.
 - **Proposed**: Fewer than ten invoices complete synchronously in the tested core behavior.
 - **Proposed**: A boundary test patches ERPNext enqueue behavior and proves that at least ten `pos_invoices` child rows select the queued branch.
 - **Verified**: `frappe.in_test` makes ERPNext's queued job run immediately, so the normal Frappe suite cannot prove production worker polling by invoice count alone.

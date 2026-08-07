@@ -315,6 +315,7 @@
   "profiles": [],
   "selected_profile": null,
   "opening_session": null,
+  "closing": null,
   "capabilities": {
     "open_session": false,
     "submit_sale": false,
@@ -327,18 +328,19 @@
 ```
 
 - **Approved**: Every capability is derived from the authenticated user, selected authorized profile, current opening, supported POS mode, and exact DocType permissions; it is never accepted from the client.
-- **Approved**: `open_session` is true only when an authorized selected profile exists, no active opening exists for that cashier/profile decision, and the user has POS Opening Entry create and submit permission.
+- **Approved**: `open_session` is true only when an authorized selected profile exists, no active opening or unresolved Closing exists for that cashier/profile decision, and the user has POS Opening Entry create and submit permission.
 - **Approved**: `submit_sale` is true only when an authorized selected profile and active submitted/unclosed opening exist and the user has POS Invoice create and submit permission.
 - **Approved**: `create_return` is true only when an authorized selected profile and active submitted/unclosed opening exist and the user has POS Invoice read, create, and submit permission. Source-sale visibility and remaining quantity are still checked by the return endpoint.
 - **Approved**: `cancel_sale` is always false in v1.
 - **Approved**: `close_session` is true only when an authorized selected profile and active submitted/unclosed opening exist and the user has POS Closing Entry create and submit permission.
 - **Approved**: When no profile is selected, every mutation capability is false. The API must not advertise a mutation that would immediately fail a server-known prerequisite.
+- **Approved**: While Closing is `processing`, `draft`, `queued`, or `failed`, every cashier mutation capability is false. A terminal submitted Closing permits `open_session` but never creates a new Opening automatically.
 - **Approved**: `allow_partial_payment` is always `false` in the v1 contract even if a POS Profile is configured otherwise; the API enforces the MVP invariant.
 
 ### `GET sessions.current`
 
 - **Proposed**: Query: `pos_profile` (required).
-- **Approved**: Returns the submitted, Open, unclosed Opening Entry owned by the authenticated cashier, assigned to the selected enabled profile, and matching the authorized profile Company, or `null`.
+- **Approved**: Returns the submitted, Open Opening Entry owned by the authenticated cashier and matching the selected profile, including an Opening linked to a nonterminal or failed Closing. It returns `null` only after core has terminally submitted the Closing and closed the Opening.
 - **Approved**: No hard current-calendar-day filter applies.
 - **Approved**: A prior-day opening remains current and contains `STALE_OPENING` in its DTO warnings.
 - **Approved**: The response always exposes the opening `posting_date`, `period_start_date`, and warning array when an opening exists.
@@ -346,9 +348,14 @@
 
 ```json
 {
-  "opening_session": null
+  "opening_session": null,
+  "closing": null
 }
 ```
+
+- **Approved**: `opening_session.lifecycle_state` is `active`, `closing_in_progress`, or `closing_failed`. `closing` is a safe projection with `name`, `status`, `phase`, `status_endpoint`, and stable `failure` fields.
+- **Approved**: A queued/processing Closing keeps the Opening visible, blocks a second Closing and all sale/return/open mutations, and remains recoverable by the same UUID/body or `closing.status` once a reference exists.
+- **Approved**: A terminal failed Closing leaves the core Opening Open but blocked for manager review. A manager-cancelled Closing follows core behavior: the original Opening link is cleared, the Opening becomes `active`, and cashier capabilities are recalculated. Android never infers these transitions.
 
 ### `POST sessions.open`
 
@@ -721,8 +728,8 @@ Return quantity uses `return-quantity/v1`: an ASCII decimal-dot string, positive
 
 ### `GET closing.preview`
 
-- **Proposed**: Query: `pos_profile` (required).
-- **Proposed**: Derives the current user's Opening Entry, period, and invoice set.
+- **Approved**: Query: `pos_profile` (required). The server derives the cashier, Company, Opening, invoice/payment/tax snapshot, and profile payment modes.
+- **Approved**: `preview_id` is a stable server-owned SHA-256 identity over `closing-preview/v1`, Opening, profile, cashier, Company/currency, ordered authoritative invoice values, taxes, opening balances, expected payment balances, and counted-amount policy. Android stores and returns it; Android never generates it.
 
 ```json
 {
@@ -737,42 +744,64 @@ Return quantity uses `return-quantity/v1`: an ASCII decimal-dot string, positive
     "opening_balances": [
       {"mode_of_payment": "Cash", "opening_amount": "500000"}
     ],
-    "warnings": [
-      {
-        "code": "STALE_OPENING",
-        "message": "The current POS opening started on an earlier calendar day.",
-        "details": {
-          "opening_date": "2026-07-22",
-          "server_date": "2026-07-23"
-        }
-      }
-    ]
+    "lifecycle_state": "active",
+    "closing": null,
+    "warnings": []
+  },
+  "preview_id": "64-lowercase-hex-characters",
+  "preview_version": "closing-preview/v1",
+  "preview_binding": {
+    "opening_entry": "POS-OPE-2026-00001",
+    "pos_profile": "OUTLET-01",
+    "cashier": "cashier@example.com",
+    "invoice_count": 12,
+    "payment_modes": ["Cash"]
   },
   "invoice_count": 12,
   "grand_total": "820000",
+  "net_total": "738738.74",
+  "total_quantity": "12",
+  "total_taxes_and_charges": "81261.26",
   "expected_payments": [
     {
       "mode_of_payment": "Cash",
       "opening_amount": "500000",
       "expected_amount": "980000"
     }
-  ]
+  ],
+  "counted_amount_policy": {
+    "currency": "IDR",
+    "decimal_places": 2,
+    "max_scale": 2,
+    "api_syntax": "ascii_decimal_dot",
+    "minimum": "0.00",
+    "maximum": "999999999999.99",
+    "rounding": "reject",
+    "policy_version": "closing-counted-amount/v1"
+  }
 }
 ```
+
+- **Approved**: The policy maximum is derived from the installed `POS Closing Entry Detail.closing_amount` database column and the Company-currency precision. Values are never rounded or truncated.
 
 ### `POST closing.submit`
 
 ```json
 {
   "pos_profile": "OUTLET-01",
+  "preview_id": "64-lowercase-hex-characters",
   "closing_balances": [
     {"mode_of_payment": "Cash", "closing_amount": "975000"}
   ]
 }
 ```
 
-- **Proposed**: Re-derives invoices and expected amounts, creates POS Closing Entry, and submits it.
-- **Proposed**: Returns the object below. The endpoint does not call consolidation helpers directly.
+- **Approved**: `preview_id` is required. Under the Opening lock the server rebuilds the snapshot and returns HTTP 409 `CLOSING_PREVIEW_STALE` before creating or mutating a Closing Entry when it differs. Details contain the current safe Opening/profile identity, `current_preview_id`, and `refresh_endpoint`.
+- **Approved**: `closing_balances` must contain exactly once every mode returned by the bound preview. Order does not affect set equality. Unknown, duplicate, missing, and additional modes are rejected before any Closing Entry is created.
+- **Approved**: Each row contains only `mode_of_payment` and the original `closing_amount` string. Android must not send expected/opening amounts, difference, accounts, invoices, totals, taxes, quantities, or allocations.
+- **Approved**: Counted values require ASCII digits with an optional decimal dot and digits on both sides. Whitespace, grouping, exponent notation, signs, `.5`, `1.`, excessive scale, negatives, and storage overflow are rejected. Zero is valid. The original accepted string participates in the Closing request hash.
+- **Approved**: The server persists Opening, expected, counted/closing, and difference for every mode plus invoice references, taxes, grand/net totals, quantity, and total taxes. It does not depend on Desk JavaScript.
+- **Approved**: The endpoint creates/submits through the existing Closing recovery executor and never directly calls merge-log creation helpers.
 
 ```json
 {
@@ -782,6 +811,24 @@ Return quantity uses `return-quantity/v1`: an ASCII decimal-dot string, positive
     "pos_profile": "OUTLET-01",
     "status": "queued",
     "invoice_count": 12,
+    "grand_total": "820000.00",
+    "net_total": "738738.74",
+    "total_quantity": "12",
+    "total_taxes_and_charges": "81261.26",
+    "payments": [
+      {
+        "mode_of_payment": "Cash",
+        "opening_amount": "500000.00",
+        "expected_amount": "980000.00",
+        "counted_amount": "975000.00",
+        "difference": "-5000.00"
+      }
+    ],
+    "reconciliation": {
+      "expected_total": "980000.00",
+      "counted_total": "975000.00",
+      "difference_total": "-5000.00"
+    },
     "failure": null
   }
 }
@@ -789,10 +836,12 @@ Return quantity uses `return-quantity/v1`: an ASCII decimal-dot string, positive
 
 ### `GET closing.status`
 
-- **Proposed**: Query: `name` (required).
-- **Proposed**: Returns the same `closing` object with refreshed status. Allowed API statuses are `draft`, `queued`, `submitted`, `failed`, and `cancelled`.
-- **Proposed**: Failed status returns `failure: {"code": "CLOSING_FAILED", "message": "Closing failed. A manager must review it in ERPNext."}` and never returns the raw core traceback/error message.
-- **Proposed**: V1 has no mobile closing-retry endpoint. A manager reviews and retries failed consolidation in ERPNext Desk.
+- **Approved**: Query: `name` (required). Returns the same complete authoritative receipt with refreshed `draft`, `queued`, `submitted`, `failed`, or `cancelled` status. Decimal fields are strings read from persisted Closing values.
+- **Approved**: `queued` is accepted but nonterminal. Same-key/same-body submit replay returns the stored initial response even if status later changes; Android polls this endpoint for the terminal receipt.
+- **Approved**: Failed status returns `failure: {"code": "CLOSING_FAILED", "message": "Closing failed. A manager must review it in ERPNext."}` and never returns raw core error details.
+- **Approved**: V1 has no mobile retry/cancel endpoint. A manager reviews failed consolidation or cancellation in ERPNext Desk.
+
+Stable Closing errors include `NO_OPEN_SESSION`, `CLOSING_PREVIEW_STALE`, `CLOSING_PAYMENT_MODE_UNKNOWN`, `CLOSING_PAYMENT_MODE_DUPLICATE`, `CLOSING_PAYMENT_MODE_MISSING`, `CLOSING_DECIMAL_MALFORMED`, `CLOSING_DECIMAL_SCALE_EXCEEDED`, `CLOSING_AMOUNT_OUT_OF_BOUNDS`, `CLOSING_IN_PROGRESS`, `CLOSING_ALREADY_CLOSED`, `PROFILE_SCOPE_MISMATCH`, and `PERMISSION_DENIED`.
 
 ## Compatibility Rules
 

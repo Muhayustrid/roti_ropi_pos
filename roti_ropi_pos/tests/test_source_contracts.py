@@ -129,6 +129,23 @@ class TestPOSClosingEntryController(IntegrationTestCase):
             "audit roti_ropi_pos.overrides.pos_closing_entry.MobilePOSClosingEntry",
         )
 
+    def test_build_invoice_query_supports_authoritative_closing_snapshot(self):
+        from erpnext.accounts.doctype.pos_closing_entry.pos_closing_entry import build_invoice_query
+
+        self.assertEqual(
+            list(inspect.signature(build_invoice_query).parameters),
+            ["invoice_doctype", "user", "pos_profile", "start", "end"],
+            "SOURCE CONTRACT: build_invoice_query signature changed — audit Closing preview binding",
+        )
+
+    def test_closing_reconciliation_fields_remain_persisted_core_fields(self):
+        fields = frappe.get_meta("POS Closing Entry Detail").fields
+        self.assertTrue(
+            {"opening_amount", "expected_amount", "closing_amount", "difference"}
+            <= {field.fieldname for field in fields},
+            "SOURCE CONTRACT: Closing reconciliation fields changed — audit terminal receipt",
+        )
+
     def test_set_status_exists(self):
         from erpnext.accounts.doctype.pos_closing_entry.pos_closing_entry import POSClosingEntry
 

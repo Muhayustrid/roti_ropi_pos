@@ -1102,6 +1102,25 @@ Expected: all modules PASS.
 
 Review the intended diff, report the proposed English commit message `feat: add mobile POS closing workflow`, and wait for explicit commit approval.
 
+#### Android Task 11 Backend Prerequisite Closure
+
+**Status:** **Complete** ✅ (`feat(mobile-pos): harden closing contract and recovery` — commit `0a946cf`). Android remains unchanged.
+
+The additive v1 Closing contract now requires a server-owned `closing-preview/v1`
+identity, exposes `closing-counted-amount/v1`, requires the exact preview payment
+set, persists all authoritative reconciliation/totals, and returns the complete
+receipt from submit/status. Session/bootstrap projection keeps processing,
+queued, and failed Closing state explicit and blocks every incompatible cashier
+mutation. Submitted Closing permits a user-initiated new Opening; manager
+cancellation restores the original Opening only when persisted ERPNext state
+does so.
+
+Verification covers stale snapshots, original-string decimal validation,
+payment-set equality, durable Draft/queued recovery, exact replay, distinct-key
+serialization, receipt equality, lifecycle capabilities, source contracts, and
+the staging-only `response-drop-closing-v1.md` protocol. The Android staging gate
+remains intentionally unexecuted.
+
 ### Task 9: Backend End-to-End Security, Upgrade, and Release Gate
 
 **Status:** **Complete** ✅ (local and isolated staging gates passed 2026-07-29; fresh 186-test gate and final v1 contract alignment passed 2026-07-29)

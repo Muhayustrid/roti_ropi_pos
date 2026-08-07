@@ -7,7 +7,9 @@ import frappe
 from erpnext.stock.doctype.stock_entry.stock_entry_utils import make_stock_entry
 from frappe.tests import IntegrationTestCase
 
+from roti_ropi_pos.api.v1 import bootstrap as bootstrap_api
 from roti_ropi_pos.api.v1 import closing as closing_api
+from roti_ropi_pos.api.v1 import sessions as sessions_api
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.tests.helpers import close_test_openings, make_cashier, make_opening_entry
 from roti_ropi_pos.tests.test_sessions import COMPANY, WAREHOUSE, make_valid_profile
@@ -60,6 +62,28 @@ class TestClosingPreview(IntegrationTestCase):
 		self.assertEqual(data["invoice_count"], 0)
 		self.assertIn("grand_total", data)
 		self.assertIn("expected_payments", data)
+
+	def test_preview_exposes_task11_binding_and_counted_amount_policy(self):
+		result = closing_api.preview(pos_profile=self.profile.name)
+		data = result["data"]
+		self.assertRegex(data["preview_id"], r"^[0-9a-f]{64}$")
+		self.assertEqual(data["preview_version"], "closing-preview/v1")
+		self.assertEqual(data["preview_binding"]["opening_entry"], self.opening)
+		self.assertEqual(data["preview_binding"]["pos_profile"], self.profile.name)
+		self.assertEqual(data["preview_binding"]["cashier"], self.cashier)
+		self.assertEqual(
+			data["counted_amount_policy"],
+			{
+				"currency": "INR",
+				"decimal_places": 2,
+				"max_scale": 2,
+				"api_syntax": "ascii_decimal_dot",
+				"minimum": "0.00",
+				"maximum": "999999999999.99",
+				"rounding": "reject",
+				"policy_version": "closing-counted-amount/v1",
+			},
+		)
 
 	def test_preview_aggregates_submitted_invoices(self):
 		self._submit_sale()
@@ -118,21 +142,21 @@ class TestClosingPreview(IntegrationTestCase):
 			with self.subTest(amount=amount):
 				result = self._close(str(uuid4()), amount=amount)
 				self.assertFalse(result["ok"])
-				self.assertEqual(result["error"]["code"], "INVALID_REQUEST")
+				self.assertEqual(result["error"]["code"], "CLOSING_DECIMAL_MALFORMED")
 
 	def test_closing_parser_accepts_zero_amount(self):
 		payload = closing_api._parse_closing_payload(self._closing_payload(amount="0"))
-		self.assertEqual(payload["closing_balances"][0]["closing_amount"], Decimal("0"))
+		self.assertEqual(payload["closing_balances"][0]["closing_amount"], "0")
 
 	def test_closing_parser_rejects_negative_amount(self):
-		with self.assertRaises(MobilePOSAPIError) as error:
-			closing_api._parse_closing_payload(self._closing_payload(amount="-1"))
-		self.assertEqual(error.exception.details["reason"], "negative_amount")
+		result = self._close(str(uuid4()), amount="-1")
+		self.assertEqual(result["error"]["code"], "CLOSING_AMOUNT_OUT_OF_BOUNDS")
+		self.assertEqual(result["error"]["details"]["reason"], "below_minimum")
 
 	def test_closing_parser_rejects_malformed_amount(self):
-		with self.assertRaises(MobilePOSAPIError) as error:
-			closing_api._parse_closing_payload(self._closing_payload(amount="not-a-number"))
-		self.assertEqual(error.exception.details["reason"], "malformed_decimal")
+		result = self._close(str(uuid4()), amount="not-a-number")
+		self.assertEqual(result["error"]["code"], "CLOSING_DECIMAL_MALFORMED")
+		self.assertEqual(result["error"]["details"]["reason"], "malformed_decimal")
 
 	def test_preview_stale_opening_warning_preserved(self):
 		frappe.db.set_value(
@@ -178,8 +202,9 @@ class TestClosingPreview(IntegrationTestCase):
 	def test_submit_replay_returns_same_reference(self):
 		self._submit_sale()
 		key = str(uuid4())
-		first = self._close(key)
-		second = self._close(key)
+		payload = self._closing_payload()
+		first = self._close(key, payload=payload)
+		second = self._close(key, payload=payload)
 		self.assertTrue(first["ok"])
 		self.assertTrue(second["ok"])
 		self.assertEqual(first["data"]["closing"]["name"], second["data"]["closing"]["name"])
@@ -189,9 +214,10 @@ class TestClosingPreview(IntegrationTestCase):
 	def test_submit_sync_path_survives_core_commit_and_completes_request(self):
 		self._submit_sale()
 		key = str(uuid4())
+		payload = self._closing_payload()
 		with patch.object(frappe, "in_test", False):
-			first = self._close(key)
-			replay = self._close(key)
+			first = self._close(key, payload=payload)
+			replay = self._close(key, payload=payload)
 
 		self.assertTrue(first["ok"], first)
 		self.assertEqual(first["data"]["closing"]["status"], "submitted")
@@ -225,6 +251,7 @@ class TestClosingPreview(IntegrationTestCase):
 
 	def test_submit_locks_opening_before_invoice_snapshot(self):
 		order = []
+		preview_id = closing_api.preview(pos_profile=self.profile.name)["data"]["preview_id"]
 		with (
 			patch(
 				"roti_ropi_pos.mobile_pos.closing._lock_opening",
@@ -235,9 +262,9 @@ class TestClosingPreview(IntegrationTestCase):
 				side_effect=lambda _opening: order.append("invoices") or [],
 			),
 		):
-			result = self._close(str(uuid4()))
+			result = self._close(str(uuid4()), preview_id=preview_id)
 		self.assertIn("ok", result)
-		self.assertLess(order.index("lock"), order.index("invoices"))
+		self.assertLess(order.index("lock"), len(order) - 1 - order[::-1].index("invoices"))
 
 	def test_unexpired_processing_request_returns_in_progress(self):
 		from roti_ropi_pos.mobile_pos.idempotency import (
@@ -334,6 +361,7 @@ class TestClosingPreview(IntegrationTestCase):
 
 	def test_submit_requires_closing_entry_create_permission(self):
 		self._submit_sale()
+		payload = self._closing_payload()
 		frappe.set_user("Administrator")
 		plain_user = frappe.db.get_value("User", {"user_type": "Website User", "enabled": 1}, "name")
 		if not plain_user:
@@ -342,9 +370,202 @@ class TestClosingPreview(IntegrationTestCase):
 		frappe.db.delete("Has Role", {"parent": plain_user, "role": "Mobile POS Cashier"})
 		frappe.cache.hdel("roles", plain_user)
 		frappe.set_user(plain_user)
-		result = self._close(str(uuid4()))
+		result = self._close(str(uuid4()), payload=payload)
 		self.assertFalse(result["ok"])
 		self.assertIn(result["error"]["code"], {"PERMISSION_ERROR", "NO_OPEN_SESSION", "PERMISSION_DENIED"})
+
+	def test_submit_rejects_stale_preview_after_new_invoice_without_artifacts(self):
+		preview_id = closing_api.preview(pos_profile=self.profile.name)["data"]["preview_id"]
+		self._submit_sale()
+		key = str(uuid4())
+		result = self._close(key, preview_id=preview_id)
+		self.assertEqual(result["error"]["code"], "CLOSING_PREVIEW_STALE")
+		repeated = self._close(key, preview_id=preview_id)
+		self.assertEqual(repeated["error"], result["error"])
+		self.assertEqual(result["error"]["details"]["refresh_endpoint"], "v1.closing.preview")
+		self.assertEqual(frappe.db.count("Mobile POS Request", {"idempotency_key": key}), 0)
+		self.assertEqual(frappe.db.count("POS Closing Entry", {"custom_mobile_pos_transaction_id": key}), 0)
+
+	def test_submit_rejects_stale_preview_after_payment_snapshot_change(self):
+		self._submit_sale()
+		preview_id = closing_api.preview(pos_profile=self.profile.name)["data"]["preview_id"]
+		invoice = frappe.db.get_value(
+			"POS Invoice", {"owner": self.cashier, "docstatus": 1}, "name", order_by="creation desc"
+		)
+		payment = frappe.db.get_value(
+			"Sales Invoice Payment", {"parenttype": "POS Invoice", "parent": invoice}, "name"
+		)
+		frappe.db.set_value("Sales Invoice Payment", payment, "amount", 99, update_modified=False)
+		result = self._close(str(uuid4()), preview_id=preview_id)
+		self.assertEqual(result["error"]["code"], "CLOSING_PREVIEW_STALE")
+
+	def test_submit_rejects_stale_preview_for_replacement_opening(self):
+		preview_id = closing_api.preview(pos_profile=self.profile.name)["data"]["preview_id"]
+		frappe.set_user("Administrator")
+		frappe.db.set_value("POS Opening Entry", self.opening, "status", "Closed")
+		replacement = make_opening_entry(
+			user=self.cashier,
+			company=COMPANY,
+			pos_profile=self.profile.name,
+			period_start_date=frappe.utils.now_datetime(),
+			posting_date=frappe.utils.today(),
+			balances=[{"mode_of_payment": "Cash", "opening_amount": "500000"}],
+		)
+		frappe.set_user(self.cashier)
+		result = self._close(str(uuid4()), preview_id=preview_id)
+		self.assertEqual(result["error"]["code"], "CLOSING_PREVIEW_STALE")
+		self.assertEqual(result["error"]["details"]["opening_entry"], replacement)
+
+	def test_submit_rejects_preview_bound_to_a_different_profile(self):
+		preview_id = closing_api.preview(pos_profile=self.profile.name)["data"]["preview_id"]
+		frappe.set_user("Administrator")
+		other_profile = make_valid_profile(
+			f"Mobile POS Closing Other {frappe.generate_hash(length=8)}", self.cashier, default=0
+		)
+		frappe.db.set_value("POS Opening Entry", self.opening, "pos_profile", other_profile.name)
+		frappe.set_user(self.cashier)
+		payload = {
+			"pos_profile": other_profile.name,
+			"preview_id": preview_id,
+			"closing_balances": [{"mode_of_payment": "Cash", "closing_amount": "0"}],
+		}
+		result = self._close(str(uuid4()), payload=payload)
+		self.assertEqual(result["error"]["code"], "CLOSING_PREVIEW_STALE")
+
+	def test_submit_requires_exact_preview_payment_mode_set(self):
+		preview_id = closing_api.preview(pos_profile=self.profile.name)["data"]["preview_id"]
+		cases = [
+			(
+				[
+					{"mode_of_payment": "Cash", "closing_amount": "0"},
+					{"mode_of_payment": "Cash", "closing_amount": "0"},
+				],
+				"CLOSING_PAYMENT_MODE_DUPLICATE",
+			),
+			([], "CLOSING_PAYMENT_MODE_MISSING"),
+			(
+				[{"mode_of_payment": "Unknown Task11 Mode", "closing_amount": "0"}],
+				"CLOSING_PAYMENT_MODE_UNKNOWN",
+			),
+		]
+		for balances, code in cases:
+			with self.subTest(code=code):
+				payload = {
+					"pos_profile": self.profile.name,
+					"preview_id": preview_id,
+					"closing_balances": balances,
+				}
+				key = str(uuid4())
+				result = self._close(key, payload=payload)
+				self.assertEqual(result["error"]["code"], code)
+				self.assertEqual(frappe.db.count("Mobile POS Request", {"idempotency_key": key}), 0)
+
+	def test_submit_accepts_zero_and_persists_exact_reconciliation(self):
+		self._submit_sale()
+		result = self._close(str(uuid4()), amount="0")
+		self.assertTrue(result["ok"], result)
+		receipt = result["data"]["closing"]
+		closing = frappe.get_doc("POS Closing Entry", receipt["name"])
+		row = closing.payment_reconciliation[0]
+		self.assertEqual(Decimal(str(row.opening_amount)), Decimal("500000"))
+		self.assertEqual(Decimal(str(row.expected_amount)), Decimal("500100"))
+		self.assertEqual(Decimal(str(row.closing_amount)), Decimal("0"))
+		self.assertEqual(Decimal(str(row.difference)), Decimal("-500100"))
+		self.assertEqual(Decimal(str(closing.grand_total)), Decimal("100"))
+		self.assertEqual(receipt, closing_api.status(name=closing.name)["data"]["closing"])
+
+	def test_submit_decimal_policy_rejects_malformed_scale_and_overflow_without_rounding(self):
+		cases = {
+			".5": "CLOSING_DECIMAL_MALFORMED",
+			"1.": "CLOSING_DECIMAL_MALFORMED",
+			"1,000": "CLOSING_DECIMAL_MALFORMED",
+			"1e2": "CLOSING_DECIMAL_MALFORMED",
+			" 1": "CLOSING_DECIMAL_MALFORMED",
+			"1 ": "CLOSING_DECIMAL_MALFORMED",
+			"+1": "CLOSING_DECIMAL_MALFORMED",
+			"-1": "CLOSING_AMOUNT_OUT_OF_BOUNDS",
+			"1.001": "CLOSING_DECIMAL_SCALE_EXCEEDED",
+			"1000000000000": "CLOSING_AMOUNT_OUT_OF_BOUNDS",
+		}
+		for amount, code in cases.items():
+			with self.subTest(amount=amount):
+				key = str(uuid4())
+				result = self._close(key, amount=amount)
+				self.assertEqual(result["error"]["code"], code)
+				self.assertEqual(
+					frappe.db.count("POS Closing Entry", {"custom_mobile_pos_transaction_id": key}), 0
+				)
+
+	def test_closing_hash_preserves_original_counted_decimal_string(self):
+		self._submit_sale()
+		key = str(uuid4())
+		preview_id = closing_api.preview(pos_profile=self.profile.name)["data"]["preview_id"]
+		first = self._close(key, amount="1.0", preview_id=preview_id)
+		self.assertTrue(first["ok"], first)
+		second = self._close(key, amount="1.00", preview_id=preview_id)
+		self.assertEqual(second["error"]["code"], "IDEMPOTENCY_KEY_REUSED")
+
+	def test_submit_with_new_key_after_terminal_close_is_rejected_as_already_closed(self):
+		self._submit_sale()
+		preview_id = closing_api.preview(pos_profile=self.profile.name)["data"]["preview_id"]
+		self.assertTrue(self._close(str(uuid4()), preview_id=preview_id)["ok"])
+		result = self._close(str(uuid4()), preview_id=preview_id)
+		self.assertEqual(result["error"]["code"], "CLOSING_ALREADY_CLOSED")
+
+	def test_distinct_key_cannot_create_second_closing_for_same_opening(self):
+		preview_id = closing_api.preview(pos_profile=self.profile.name)["data"]["preview_id"]
+		first = self._make_unresolved_closing("Draft")
+		second_key = str(uuid4())
+		result = self._close(second_key, preview_id=preview_id)
+		self.assertEqual(result["error"]["code"], "CLOSING_IN_PROGRESS")
+		self.assertEqual(frappe.db.count("POS Closing Entry", {"pos_opening_entry": self.opening}), 1)
+		self.assertEqual(
+			frappe.db.count(
+				"POS Closing Entry",
+				{"custom_mobile_pos_transaction_id": first.custom_mobile_pos_transaction_id},
+			),
+			1,
+		)
+		self.assertEqual(frappe.db.count("Mobile POS Request", {"idempotency_key": second_key}), 0)
+
+	def test_queued_closing_keeps_opening_visible_and_blocks_mutations(self):
+		closing = self._make_unresolved_closing("Queued")
+		current = sessions_api.current(pos_profile=self.profile.name)["data"]
+		self.assertEqual(current["opening_session"]["name"], self.opening)
+		self.assertEqual(current["opening_session"]["lifecycle_state"], "closing_in_progress")
+		self.assertEqual(current["closing"]["name"], closing.name)
+		bootstrap = bootstrap_api.get(pos_profile=self.profile.name)["data"]
+		self.assertFalse(any(bootstrap["capabilities"].values()))
+
+	def test_failed_closing_keeps_opening_blocked_for_manager_review(self):
+		closing = self._make_unresolved_closing("Failed")
+		current = sessions_api.current(pos_profile=self.profile.name)["data"]
+		self.assertEqual(current["opening_session"]["lifecycle_state"], "closing_failed")
+		self.assertEqual(current["closing"]["name"], closing.name)
+		self.assertEqual(current["closing"]["failure"]["code"], "CLOSING_FAILED")
+		self.assertFalse(
+			any(bootstrap_api.get(pos_profile=self.profile.name)["data"]["capabilities"].values())
+		)
+
+	def test_submitted_closing_allows_explicit_new_opening_capability(self):
+		self._submit_sale()
+		result = self._close(str(uuid4()), amount="0")
+		self.assertTrue(result["ok"], result)
+		bootstrap = bootstrap_api.get(pos_profile=self.profile.name)["data"]
+		self.assertIsNone(bootstrap["opening_session"])
+		self.assertIsNone(bootstrap["closing"])
+		self.assertTrue(bootstrap["capabilities"]["open_session"])
+
+	def test_cancelled_closing_restores_original_opening_as_active(self):
+		closing = self._make_unresolved_closing("Cancelled")
+		frappe.db.set_value("POS Opening Entry", self.opening, "pos_closing_entry", None)
+		current = sessions_api.current(pos_profile=self.profile.name)["data"]
+		self.assertEqual(current["opening_session"]["lifecycle_state"], "active")
+		self.assertIsNone(current["closing"])
+		capabilities = bootstrap_api.get(pos_profile=self.profile.name)["data"]["capabilities"]
+		self.assertFalse(capabilities["open_session"])
+		self.assertTrue(capabilities["close_session"])
+		self.assertEqual(closing.status, "Cancelled")
 
 	# ── submit (queued path: >= 10 invoices) ────────────────────────────
 
@@ -478,6 +699,17 @@ class TestClosingPreview(IntegrationTestCase):
 
 	# ── helpers ──────────────────────────────────────────────────────────
 
+	def _make_unresolved_closing(self, status: str):
+		from roti_ropi_pos.mobile_pos.closing import _create_closing_draft
+
+		key = str(uuid4())
+		payload = closing_api._parse_closing_payload(self._closing_payload(amount="0"))
+		closing = _create_closing_draft(self.profile, payload, key)
+		frappe.db.set_value("POS Closing Entry", closing.name, "status", status)
+		frappe.db.set_value("POS Opening Entry", self.opening, "pos_closing_entry", closing.name)
+		closing.reload()
+		return closing
+
 	def _submit_sale(self):
 		from unittest.mock import patch as _patch
 
@@ -503,15 +735,19 @@ class TestClosingPreview(IntegrationTestCase):
 			frappe.local.form_dict = frappe._dict(payload)
 			return sales_api.submit()
 
-	def _closing_payload(self, amount="500100"):
+	def _closing_payload(self, amount="500100", *, preview_id=None):
+		preview_id = preview_id or closing_api.preview(pos_profile=self.profile.name)["data"]["preview_id"]
 		return {
 			"pos_profile": self.profile.name,
+			"preview_id": preview_id,
 			"closing_balances": [{"mode_of_payment": "Cash", "closing_amount": amount}],
 		}
 
-	def _close(self, idempotency_key: str, *, amount="500100"):
+	def _close(self, idempotency_key: str, *, amount="500100", preview_id=None, payload=None):
 		with patch("frappe.get_request_header", return_value=idempotency_key):
-			frappe.local.form_dict = frappe._dict(self._closing_payload(amount))
+			frappe.local.form_dict = frappe._dict(
+				payload or self._closing_payload(amount, preview_id=preview_id)
+			)
 			return closing_api.submit()
 
 	def _ensure_item_price(self) -> None:
