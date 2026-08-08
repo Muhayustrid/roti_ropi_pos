@@ -34,7 +34,6 @@ def submit(**kwargs) -> dict:
 		)
 	)
 	payload = _parse_sale_payload(dict(frappe.form_dict), currency=profile.currency)
-	_lock_stock(payload["items"], profile.warehouse)
 	return execute_idempotent(
 		"v1.sales.submit",
 		payload,
@@ -107,29 +106,6 @@ def create_return(**kwargs) -> dict:
 		payload,
 		lambda transaction_id: create_return_service(payload, transaction_id),
 	)
-
-
-def _lock_stock(items: list[dict], warehouse: str) -> None:
-	stock_items = set()
-	for row in items:
-		item_code = row["item_code"]
-		if frappe.get_cached_value("Item", item_code, "is_stock_item"):
-			stock_items.add(item_code)
-		if frappe.db.exists("Product Bundle", {"name": item_code, "disabled": 0}):
-			stock_items.update(
-				frappe.get_all(
-					"Product Bundle Item",
-					filters={"parent": item_code},
-					pluck="item_code",
-				)
-			)
-	if stock_items:
-		frappe.db.sql(
-			"""SELECT name FROM `tabBin`
-			WHERE warehouse = %(warehouse)s AND item_code IN %(items)s
-			ORDER BY item_code FOR UPDATE""",
-			{"warehouse": warehouse, "items": sorted(stock_items)},
-		)
 
 
 def _parse_sale_payload(value, *, currency: str | None = None) -> dict:

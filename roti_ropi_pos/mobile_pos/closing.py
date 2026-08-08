@@ -171,9 +171,9 @@ def _claim_expired_request(scope_key: str, request_hash: str):
 
 
 def _create_closing_draft(profile, payload: dict, transaction_id: str):
-	opening = _require_opening(profile)
+	opening = _require_opening(profile, for_submit=True, for_update=True)
 	_lock_opening(opening.name)
-	opening = frappe.get_doc("POS Opening Entry", opening.name)
+	opening = frappe.get_doc("POS Opening Entry", opening.name, for_update=True)
 	if opening.status != "Open" or opening.docstatus != 1 or opening.pos_closing_entry:
 		_raise_closing_unavailable(profile, opening)
 	validated = _validate_submission(profile, payload, opening=opening)
@@ -333,8 +333,8 @@ def closing_dto(doc) -> dict:
 	}
 
 
-def _require_opening(profile, *, for_submit: bool = False):
-	opening = get_current_opening(profile)
+def _require_opening(profile, *, for_submit: bool = False, for_update: bool = False):
+	opening = get_current_opening(profile, for_update=for_update)
 	if not opening:
 		if for_submit:
 			closing = frappe.db.get_value(

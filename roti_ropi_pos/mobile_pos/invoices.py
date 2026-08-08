@@ -27,13 +27,15 @@ def submit_sale(payload: dict, transaction_id: str) -> MutationResult:
 	"""Create one fully settled, authoritative POS Invoice."""
 	profile = get_authorized_profile(payload["pos_profile"])
 	require_pos_invoice_mode()
-	if not get_current_opening(profile):
+	opening = get_current_opening(profile, for_update=True)
+	if not opening or opening.pos_closing_entry:
 		raise MobilePOSAPIError(
 			"NO_OPEN_SESSION",
 			"No open POS session is available for this profile.",
 			status=422,
 			details={"pos_profile": profile.name},
 		)
+	_lock_sale_stock(profile, payload["items"])
 	require_doc_permission("POS Invoice", "create")
 	require_doc_permission("POS Invoice", "submit")
 	customer = resolve_customer(
@@ -495,8 +497,6 @@ def get_sale(name: str) -> dict:
 def create_return(payload: dict, transaction_id: str) -> MutationResult:
 	"""Create a scoped POS Invoice return through ERPNext's mapper."""
 	source = _source_invoice_for_return(payload["source_name"])
-	frappe.db.get_value("POS Invoice", source.name, "name", for_update=True)
-	source.reload()
 	try:
 		profile = get_authorized_profile(source.pos_profile)
 	except MobilePOSAPIError as error:
@@ -505,13 +505,24 @@ def create_return(payload: dict, transaction_id: str) -> MutationResult:
 		raise
 	if source.company != profile.company:
 		raise _not_found()
-	if not get_current_opening(profile):
+	opening = get_current_opening(profile, for_update=True)
+	if not opening or opening.pos_closing_entry:
 		raise MobilePOSAPIError(
 			"NO_OPEN_SESSION",
 			"No open POS session is available for this profile.",
 			status=422,
 			details={"pos_profile": profile.name},
 		)
+	frappe.db.get_value("POS Invoice", source.name, "name", for_update=True)
+	source.reload()
+	if (
+		source.docstatus != 1
+		or source.is_return
+		or source.owner != frappe.session.user
+		or source.pos_profile != profile.name
+		or source.company != profile.company
+	):
+		raise _not_found()
 	require_doc_permission("POS Invoice", "create")
 	require_doc_permission("POS Invoice", "submit")
 	remaining_by_row = _remaining_return_quantities(source, for_update=True)
@@ -600,6 +611,29 @@ def _invalid_request(field: str, reason: str) -> MobilePOSAPIError:
 	return MobilePOSAPIError(
 		"INVALID_REQUEST", f"{field} is invalid.", details={"field": field, "reason": reason}
 	)
+
+
+def _lock_sale_stock(profile, items: list[dict]) -> None:
+	stock_items = set()
+	for row in items:
+		item_code = row["item_code"]
+		if frappe.get_cached_value("Item", item_code, "is_stock_item"):
+			stock_items.add(item_code)
+		if frappe.db.exists("Product Bundle", {"name": item_code, "disabled": 0}):
+			stock_items.update(
+				frappe.get_all(
+					"Product Bundle Item",
+					filters={"parent": item_code},
+					pluck="item_code",
+				)
+			)
+	if stock_items:
+		frappe.db.sql(
+			"""SELECT name FROM `tabBin`
+			WHERE warehouse = %(warehouse)s AND item_code IN %(items)s
+			ORDER BY item_code FOR UPDATE""",
+			{"warehouse": profile.warehouse, "items": sorted(stock_items)},
+		)
 
 
 def _validate_total_stock(profile, items: list[dict]) -> None:
@@ -870,9 +904,7 @@ def _return_projection(doc, profile) -> dict:
 			rejection_reason = "RETURN_LIMIT_REACHED"
 		elif not allowed_mode_names:
 			rejection_reason = "NO_VALID_REFUND_MODE"
-		elif (tracking.has_batch_no and not batch_numbers) or (
-			tracking.has_serial_no and not serial_numbers
-		):
+		elif (tracking.has_batch_no and not batch_numbers) or (tracking.has_serial_no and not serial_numbers):
 			rejection_reason = "SERIAL_BATCH_REFERENCE_UNAVAILABLE"
 		else:
 			rejection_reason = None

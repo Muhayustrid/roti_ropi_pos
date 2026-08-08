@@ -1,5 +1,7 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal
+from threading import Event
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -15,6 +17,54 @@ from roti_ropi_pos.tests.helpers import close_test_openings, make_cashier, make_
 from roti_ropi_pos.tests.test_sessions import COMPANY, WAREHOUSE, make_valid_profile
 
 ITEM = "_Test Item"
+
+
+def _run_sale_during_closing(site, user, payload, transaction_id, sale_validated, closing_finished):
+	from roti_ropi_pos.mobile_pos.invoices import submit_sale
+	from roti_ropi_pos.overrides.pos_invoice import MobilePOSInvoice
+
+	frappe.init(site=site)
+	frappe.connect()
+	original_validate = MobilePOSInvoice.validate_pos_opening_entry
+	try:
+		frappe.set_user(user)
+
+		def pause_after_submit_validation(invoice):
+			original_validate(invoice)
+			if invoice.docstatus == 1:
+				sale_validated.set()
+				closing_finished.wait(timeout=10)
+
+		with patch.object(MobilePOSInvoice, "validate_pos_opening_entry", pause_after_submit_validation):
+			result = submit_sale(payload, transaction_id)
+		frappe.db.commit()
+		return result
+	except Exception:
+		frappe.db.rollback()
+		raise
+	finally:
+		frappe.destroy()
+
+
+def _run_closing_during_sale(site, user, payload, transaction_id, sale_validated, closing_finished):
+	frappe.init(site=site)
+	frappe.connect()
+	try:
+		frappe.set_user(user)
+		frappe.local.form_dict = frappe._dict(payload)
+		frappe.local.request = frappe._dict(headers={"X-Idempotency-Key": transaction_id})
+		if not sale_validated.wait(timeout=3):
+			raise AssertionError("Sale did not reach submit-time Opening validation.")
+		with patch("erpnext.accounts.doctype.pos_closing_entry.pos_closing_entry.consolidate_pos_invoices"):
+			result = closing_api.submit()
+		frappe.db.commit()
+		closing_finished.set()
+		return result
+	except Exception:
+		frappe.db.rollback()
+		raise
+	finally:
+		frappe.destroy()
 
 
 class TestClosingPreview(IntegrationTestCase):
@@ -92,6 +142,51 @@ class TestClosingPreview(IntegrationTestCase):
 		self.assertTrue(result["ok"])
 		self.assertEqual(result["data"]["invoice_count"], 2)
 		self.assertEqual(Decimal(result["data"]["grand_total"]), Decimal("200"))
+
+	def test_sale_cannot_commit_outside_locked_closing_snapshot(self):
+		from roti_ropi_pos.api.v1 import sales as sales_api
+
+		preview_id = closing_api.preview(pos_profile=self.profile.name)["data"]["preview_id"]
+		sale_payload = sales_api._parse_sale_payload(self._sale_payload())
+		closing_payload = self._closing_payload(amount="500000", preview_id=preview_id)
+		sale_key = str(uuid4())
+		closing_key = str(uuid4())
+		sale_validated = Event()
+		closing_finished = Event()
+		site = frappe.local.site
+		frappe.db.commit()
+
+		with ThreadPoolExecutor(max_workers=2) as executor:
+			sale_future = executor.submit(
+				_run_sale_during_closing,
+				site,
+				self.cashier,
+				sale_payload,
+				sale_key,
+				sale_validated,
+				closing_finished,
+			)
+			closing_future = executor.submit(
+				_run_closing_during_sale,
+				site,
+				self.cashier,
+				closing_payload,
+				closing_key,
+				sale_validated,
+				closing_finished,
+			)
+			sale = sale_future.result(timeout=30)
+			closing = closing_future.result(timeout=30)
+
+		self.assertTrue(frappe.db.exists("POS Invoice", {"name": sale.reference_name, "docstatus": 1}))
+		self.assertFalse(closing["ok"])
+		self.assertEqual(closing["error"]["code"], "CLOSING_PREVIEW_STALE")
+		self.assertFalse(
+			frappe.db.exists(
+				"POS Closing Entry",
+				{"pos_opening_entry": self.opening, "docstatus": 1},
+			)
+		)
 
 	def test_preview_excludes_consolidated_invoices(self):
 		inv_name = self._submit_sale()["data"]["sale"]["summary"]["name"]
@@ -715,7 +810,12 @@ class TestClosingPreview(IntegrationTestCase):
 
 		from roti_ropi_pos.api.v1 import sales as sales_api
 
-		payload = {
+		with _patch("frappe.get_request_header", return_value=str(uuid4())):
+			frappe.local.form_dict = frappe._dict(self._sale_payload())
+			return sales_api.submit()
+
+	def _sale_payload(self):
+		return {
 			"pos_profile": self.profile.name,
 			"customer": self.profile.customer,
 			"walk_in_customer_name": None,
@@ -731,9 +831,6 @@ class TestClosingPreview(IntegrationTestCase):
 			],
 			"payments": [{"mode_of_payment": "Cash", "amount": "100", "reference_no": None}],
 		}
-		with _patch("frappe.get_request_header", return_value=str(uuid4())):
-			frappe.local.form_dict = frappe._dict(payload)
-			return sales_api.submit()
 
 	def _closing_payload(self, amount="500100", *, preview_id=None):
 		preview_id = preview_id or closing_api.preview(pos_profile=self.profile.name)["data"]["preview_id"]

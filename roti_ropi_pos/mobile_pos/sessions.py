@@ -13,12 +13,13 @@ from roti_ropi_pos.mobile_pos.profiles import profile_opening_config
 from roti_ropi_pos.mobile_pos.validation import opening_amount_string
 
 
-def get_current_opening(profile):
+def get_current_opening(profile, *, for_update: bool = False):
 	"""Return the cashier's submitted, Open, unclosed POS Opening Entry.
 
 	The lookup applies no hard current-calendar-day filter; a prior-day shift
 	remains current. ``require_doc_permission`` enforces POS Opening Entry read
-	permission without ``ignore_permissions``.
+	permission without ``ignore_permissions``. Mutations use ``for_update`` to
+	serialize against Closing on the authoritative Opening row.
 	"""
 	name = frappe.db.get_value(
 		"POS Opening Entry",
@@ -31,10 +32,11 @@ def get_current_opening(profile):
 		},
 		"name",
 		order_by="period_start_date desc",
+		for_update=for_update,
 	)
 	if not name:
 		return None
-	opening = frappe.get_doc("POS Opening Entry", name)
+	opening = frappe.get_doc("POS Opening Entry", name, for_update=for_update)
 	require_doc_permission("POS Opening Entry", "read", doc=opening)
 	return opening
 
