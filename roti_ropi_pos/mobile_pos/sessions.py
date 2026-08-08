@@ -194,9 +194,16 @@ def closing_projection(opening=None) -> dict | None:
 	"""Project an unresolved Closing that blocks cashier mutations."""
 	closing_name = getattr(opening, "pos_closing_entry", None) if opening else None
 	if not closing_name:
+		filters = {
+			"user": frappe.session.user,
+			"endpoint": "v1.closing.submit",
+			"status": "Processing",
+		}
+		if opening:
+			filters["creation"] = [">=", opening.creation or opening.period_start_date]
 		request = frappe.db.get_value(
 			"Mobile POS Request",
-			{"user": frappe.session.user, "endpoint": "v1.closing.submit", "status": "Processing"},
+			filters,
 			["reference_name", "phase"],
 			as_dict=True,
 			order_by="creation desc",
@@ -213,7 +220,13 @@ def closing_projection(opening=None) -> dict | None:
 				"failure": None,
 			}
 	closing = frappe.get_doc("POS Closing Entry", closing_name)
-	status = (closing.status or "Draft").lower()
+	if opening and closing.pos_opening_entry != opening.name:
+		return None
+	status = (
+		"submitted"
+		if closing.docstatus == 1 and closing.status in {None, "Draft"}
+		else (closing.status or "Draft").lower()
+	)
 	return {
 		"name": closing.name,
 		"status": status,

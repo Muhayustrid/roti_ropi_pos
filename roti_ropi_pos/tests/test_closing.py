@@ -651,6 +651,48 @@ class TestClosingPreview(IntegrationTestCase):
 		self.assertIsNone(bootstrap["closing"])
 		self.assertTrue(bootstrap["capabilities"]["open_session"])
 
+	def test_stale_processing_request_does_not_contaminate_new_opening(self):
+		from roti_ropi_pos.mobile_pos.closing import _create_closing_draft
+		from roti_ropi_pos.mobile_pos.idempotency import _create_processing_request, _scope_key
+
+		key = str(uuid4())
+		payload = closing_api._parse_closing_payload(self._closing_payload(amount="0"))
+		closing = _create_closing_draft(self.profile, payload, key)
+		frappe.db.set_value(
+			"POS Closing Entry",
+			closing.name,
+			{"docstatus": 1, "status": "Draft"},
+			update_modified=False,
+		)
+		frappe.db.set_value(
+			"POS Opening Entry",
+			self.opening,
+			{"status": "Closed", "pos_closing_entry": closing.name},
+			update_modified=False,
+		)
+		request = _create_processing_request(
+			_scope_key(key, "v1.closing.submit"), key, "v1.closing.submit", "test-hash"
+		)
+		request.reference_doctype = "POS Closing Entry"
+		request.reference_name = closing.name
+		request.phase = "SubmitStarted"
+		request.flags.ignore_links = True
+		request.save(ignore_permissions=True)
+		current_opening = make_opening_entry(
+			user=self.cashier,
+			company=COMPANY,
+			pos_profile=self.profile.name,
+			period_start_date=frappe.utils.now_datetime() + timedelta(minutes=1),
+			posting_date=frappe.utils.today(),
+		)
+
+		current = sessions_api.current(pos_profile=self.profile.name)["data"]
+		bootstrap = bootstrap_api.get(pos_profile=self.profile.name)["data"]
+		self.assertEqual(current["opening_session"]["name"], current_opening)
+		self.assertEqual(current["opening_session"]["lifecycle_state"], "active")
+		self.assertIsNone(current["closing"])
+		self.assertTrue(bootstrap["capabilities"]["close_session"])
+
 	def test_cancelled_closing_restores_original_opening_as_active(self):
 		closing = self._make_unresolved_closing("Cancelled")
 		frappe.db.set_value("POS Opening Entry", self.opening, "pos_closing_entry", None)
