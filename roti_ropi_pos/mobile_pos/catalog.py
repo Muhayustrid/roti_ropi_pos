@@ -41,7 +41,7 @@ def search_items(
 	groups = _allowed_item_groups(profile)
 	if item_group and item_group not in groups:
 		raise _not_found("item_group", item_group)
-	visible = _visible_item_codes()
+	visible = _visible_item_groups()
 	first_page_length = limit + 1
 	raw_start = 0
 	rows = []
@@ -60,11 +60,7 @@ def search_items(
 			search_term=q,
 		)
 		page = result.get("items", []) if isinstance(result, dict) else result
-		rows.extend(
-			row
-			for row in page
-			if _row_value(row, "item_group") in groups and _row_value(row, "item_code") in visible
-		)
+		rows.extend(row for row in page if visible.get(_row_value(row, "item_code")) in groups)
 		if len(page) < page_length:
 			break
 		raw_start += len(page)
@@ -195,8 +191,8 @@ def _allowed_item_groups(profile) -> set[str]:
 	return {group.strip("'") for group in get_item_groups(profile.name)}
 
 
-def _visible_item_codes() -> set[str]:
-	return set(frappe.get_list("Item", pluck="name"))
+def _visible_item_groups() -> dict[str, str]:
+	return {row.name: row.item_group for row in frappe.get_list("Item", fields=["name", "item_group"])}
 
 
 def _get_visible_item(item_code: str):
