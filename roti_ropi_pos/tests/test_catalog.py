@@ -48,7 +48,9 @@ class TestCatalogContracts(IntegrationTestCase):
 		with (
 			patch("roti_ropi_pos.mobile_pos.catalog.require_doc_permission"),
 			patch("roti_ropi_pos.mobile_pos.catalog._allowed_item_groups", return_value={"Allowed"}),
-			patch("roti_ropi_pos.mobile_pos.catalog._visible_item_codes", return_value={"ITEM-001"}),
+			patch(
+				"roti_ropi_pos.mobile_pos.catalog._visible_item_groups", return_value={"ITEM-001": "Allowed"}
+			),
 			patch("roti_ropi_pos.mobile_pos.catalog.get_items", return_value={"items": [row]}) as get_items,
 		):
 			result = search_items(profile, limit=20)
@@ -103,7 +105,9 @@ class TestCatalogContracts(IntegrationTestCase):
 		with (
 			patch("roti_ropi_pos.mobile_pos.catalog.require_doc_permission"),
 			patch("roti_ropi_pos.mobile_pos.catalog._allowed_item_groups", return_value={"Allowed"}),
-			patch("roti_ropi_pos.mobile_pos.catalog._visible_item_codes", return_value={"VISIBLE"}),
+			patch(
+				"roti_ropi_pos.mobile_pos.catalog._visible_item_groups", return_value={"VISIBLE": "Allowed"}
+			),
 			patch(
 				"roti_ropi_pos.mobile_pos.catalog.get_items",
 				side_effect=[{"items": [forbidden, forbidden]}, {"items": [visible]}],
@@ -113,6 +117,53 @@ class TestCatalogContracts(IntegrationTestCase):
 
 		self.assertEqual([item["item_code"] for item in result["items"]], ["VISIBLE"])
 		self.assertFalse(result["page"]["has_more"])
+
+	def test_search_resolves_item_group_from_item_master_when_core_row_omits_it(self):
+		from roti_ropi_pos.mobile_pos.catalog import search_items
+
+		profile = SimpleNamespace(
+			name="POS-TEST",
+			company="Test Company",
+			warehouse="Test Warehouse",
+			selling_price_list="PG-TEST",
+			currency="IDR",
+		)
+		allowed_row = {
+			"item_code": "BROWSE-ALLOWED",
+			"item_name": "Browse Allowed",
+			"description": "",
+			"item_image": None,
+			"stock_uom": "Nos",
+			"uom": "Nos",
+			"price_list_rate": 10,
+			"actual_qty": 2,
+			"currency": "IDR",
+		}
+		forbidden_row = dict(allowed_row, item_code="BROWSE-FORBIDDEN", item_name="Browse Forbidden")
+		with (
+			patch("roti_ropi_pos.mobile_pos.catalog.require_doc_permission"),
+			patch("roti_ropi_pos.mobile_pos.catalog._allowed_item_groups", return_value={"Allowed"}),
+			patch(
+				"roti_ropi_pos.mobile_pos.catalog._visible_item_groups",
+				return_value={"BROWSE-ALLOWED": "Allowed", "BROWSE-FORBIDDEN": "Forbidden"},
+			),
+			patch(
+				"roti_ropi_pos.mobile_pos.catalog.get_items",
+				return_value={"items": [allowed_row, forbidden_row]},
+			),
+		):
+			result = search_items(profile, limit=20)
+
+		self.assertEqual([item["item_code"] for item in result["items"]], ["BROWSE-ALLOWED"])
+
+	def test_visible_item_groups_uses_permission_aware_projection(self):
+		from roti_ropi_pos.mobile_pos import catalog
+
+		rows = [frappe._dict(name="ITEM-001", item_group="Allowed")]
+		with patch("roti_ropi_pos.mobile_pos.catalog.frappe.get_list", return_value=rows) as get_list:
+			self.assertEqual(catalog._visible_item_groups(), {"ITEM-001": "Allowed"})
+
+		get_list.assert_called_once_with("Item", fields=["name", "item_group"])
 
 	def test_search_applies_offset_after_scope_filter(self):
 		from roti_ropi_pos.mobile_pos.catalog import search_items
@@ -137,7 +188,10 @@ class TestCatalogContracts(IntegrationTestCase):
 		with (
 			patch("roti_ropi_pos.mobile_pos.catalog.require_doc_permission"),
 			patch("roti_ropi_pos.mobile_pos.catalog._allowed_item_groups", return_value={"Allowed"}),
-			patch("roti_ropi_pos.mobile_pos.catalog._visible_item_codes", return_value={"FIRST", "SECOND"}),
+			patch(
+				"roti_ropi_pos.mobile_pos.catalog._visible_item_groups",
+				return_value={"FIRST": "Allowed", "SECOND": "Allowed"},
+			),
 			patch(
 				"roti_ropi_pos.mobile_pos.catalog.get_items",
 				return_value={"items": [hidden, first, second]},
@@ -169,11 +223,11 @@ class TestCatalogContracts(IntegrationTestCase):
 			}
 			for index in range(100)
 		]
-		visible = {row["item_code"] for row in first_page + second_page}
+		visible = {row["item_code"]: "Allowed" for row in first_page + second_page}
 		with (
 			patch("roti_ropi_pos.mobile_pos.catalog.require_doc_permission"),
 			patch("roti_ropi_pos.mobile_pos.catalog._allowed_item_groups", return_value={"Allowed"}),
-			patch("roti_ropi_pos.mobile_pos.catalog._visible_item_codes", return_value=visible),
+			patch("roti_ropi_pos.mobile_pos.catalog._visible_item_groups", return_value=visible),
 			patch(
 				"roti_ropi_pos.mobile_pos.catalog.get_items",
 				side_effect=[{"items": first_page}, {"items": second_page}],
@@ -202,7 +256,7 @@ class TestCatalogContracts(IntegrationTestCase):
 		with (
 			patch("roti_ropi_pos.mobile_pos.catalog.require_doc_permission"),
 			patch("roti_ropi_pos.mobile_pos.catalog._allowed_item_groups", return_value={"Allowed"}),
-			patch("roti_ropi_pos.mobile_pos.catalog._visible_item_codes", return_value=set()),
+			patch("roti_ropi_pos.mobile_pos.catalog._visible_item_groups", return_value={}),
 			patch("roti_ropi_pos.mobile_pos.catalog.get_items", side_effect=full_page) as get_items,
 		):
 			result = search_items(profile, limit=1)
