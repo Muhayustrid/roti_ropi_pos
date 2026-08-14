@@ -97,14 +97,18 @@ Read this file before changing this repository. These rules apply to the entire 
 
 ## Skills and Navigation
 
-- Use `brainstorming` before new behavior, `writing-plans` for approved multi-step work, `test-driven-development` during implementation, `systematic-debugging` for failures, `requesting-code-review` before completion, and `verification-before-completion` before success claims.
-- Primary Frappe development skill: `/Users/rotiropi/DockerERPNext/ai-skills/frappe/skills/skills/frappe-app-dev/SKILL.md`.
-- This is an existing app; read `/Users/rotiropi/DockerERPNext/ai-skills/frappe/skills/skills/frappe-app-dev/references/existing-app.md`, then load only task-relevant references.
-- Before implementing APIs, hooks, DocTypes, permissions, controllers, caching, tests, or bench operations, read the corresponding reference in `/Users/rotiropi/DockerERPNext/ai-skills/frappe/skills/skills/frappe-app-dev/references/`. For fixtures, read `hooks.md` and `bench-operations.md`, plus `permissions.md` for role/permission fixtures and `testing.md` for test data.
-- Frappe skills and references are guidance only. They do not override this file or the versioned Mobile POS contracts, and they do not replace verification against installed Frappe/ERPNext source and executable tests.
-- Use the `graphify` skill for codebase navigation only; installed source and executable tests remain authoritative.
-- Graphify skill: `/Users/rotiropi/.config/opencode/skills/graphify/SKILL.md`.
-- ERPNext graph: `/Users/rotiropi/DockerERPNext/graphify-output/erpnext/graphify-out/graph.json`.
-- Frappe graph: `/Users/rotiropi/DockerERPNext/graphify-output/frappe/graphify-out/graph.json`.
-- Bakery graph: `/Users/rotiropi/DockerERPNext/graphify-output/bakery_manufacturing/graphify-out/graph.json`.
-- Do not infer correctness from Graphify edges. Re-open every cited source location before implementation.
+- Use `superpowers:brainstorming` before new behavior.
+- Use `superpowers:writing-plans` for approved multi-step work.
+- Use `superpowers:test-driven-development` during implementation.
+- Use `superpowers:systematic-debugging` for failures.
+- Use `superpowers:requesting-code-review` before completion.
+- Use `superpowers:verification-before-completion` before success claims.
+- Use `frappe-app-dev` as the primary skill for all Frappe Framework app work. Let it select the workflow and task-specific references.
+- Use `code-style` for general code changes. For Frappe work, `frappe-app-dev` takes priority.
+- Use `quality-code-review` for Frappe application quality and security reviews.
+- Use `technical-writing` for documentation, README files, plans, commit messages, pull requests, and release notes.
+- Use `ui-design` for UI work. Also use `frappe-app-dev` when the UI belongs to a Frappe app.
+- Skills are guidance only. They do not override this file or the versioned Mobile POS contracts.
+- Skills do not replace verification against installed Frappe and ERPNext source or executable tests.
+- Use CodeGraph for codebase navigation when `.codegraph/` exists. Prefer `codegraph_explore` before grep, find, or direct file reads.
+- Installed source and executable tests remain authoritative. Do not infer correctness solely from CodeGraph output.
