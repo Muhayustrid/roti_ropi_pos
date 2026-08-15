@@ -22,7 +22,7 @@ Android is outside this repository and should be built separately in:
 ## Runtime Requirements
 
 - Frappe and ERPNext v16.
-- Required apps: `erpnext`, `bakery_manufacturing`, and `roti_ropi_pos`.
+- Required apps: `erpnext`, `stock_additional`, and `roti_ropi_pos`.
 - **POS Settings > Invoice Type** must be `POS Invoice`.
 - HTTPS base URL.
 - Redis workers must run for queued closing consolidation.
