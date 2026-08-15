@@ -97,9 +97,12 @@ class TestSalePaymentAmountPolicy(IntegrationTestCase):
 
 	def test_sale_payment_amount_policy_projects_smallest_positive_unit(self):
 		for decimal_places, minimum in ((0, "1"), (2, "0.01"), (3, "0.001")):
-			with self.subTest(decimal_places=decimal_places), patch(
-				"roti_ropi_pos.mobile_pos.validation.frappe_get_currency_precision",
-				return_value=decimal_places,
+			with (
+				self.subTest(decimal_places=decimal_places),
+				patch(
+					"roti_ropi_pos.mobile_pos.validation.frappe_get_currency_precision",
+					return_value=decimal_places,
+				),
 			):
 				policy = sale_payment_amount_policy("TEST")
 				self.assertEqual(policy["decimal_places"], decimal_places)
@@ -111,9 +114,12 @@ class TestSalePaymentAmountPolicy(IntegrationTestCase):
 			(2, "0.01", "0.001"),
 			(3, "0.001", "0.0001"),
 		):
-			with self.subTest(decimal_places=decimal_places), patch(
-				"roti_ropi_pos.mobile_pos.validation.frappe_get_currency_precision",
-				return_value=decimal_places,
+			with (
+				self.subTest(decimal_places=decimal_places),
+				patch(
+					"roti_ropi_pos.mobile_pos.validation.frappe_get_currency_precision",
+					return_value=decimal_places,
+				),
 			):
 				self.assertEqual(sale_payment_amount_string(minimum, currency="TEST"), minimum)
 				with self.assertRaises(MobilePOSAPIError) as error:
@@ -624,6 +630,7 @@ class TestSaleQuoteCart(IntegrationTestCase):
 		self.assertFalse(result["ok"])
 		self.assertEqual(result["error"]["code"], "NO_OPEN_SESSION")
 
+
 class TestSaleSubmitExactSettlement(IntegrationTestCase):
 	def setUp(self) -> None:
 		super().setUp()
@@ -940,6 +947,7 @@ class TestSaleSubmitExactSettlement(IntegrationTestCase):
 			frappe.db.count("POS Invoice", {"pos_profile": self.profile.name, "grand_total": float(grand)}),
 			1,
 		)
+
 
 class TestCashierSaleFlow(IntegrationTestCase):
 	"""End-to-end cashier flow: every primary path runs as the Mobile POS

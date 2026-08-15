@@ -113,7 +113,10 @@ class TestAuthentication(IntegrationTestCase):
 		)
 		bundle = next(row for row in cashier_rows if row["parent"] == "Serial and Batch Bundle")
 		self.assertEqual(
-			{permission: int(bool(bundle.get(permission))) for permission in ("read", "write", "create", "submit", "cancel", "delete")},
+			{
+				permission: int(bool(bundle.get(permission)))
+				for permission in ("read", "write", "create", "submit", "cancel", "delete")
+			},
 			{"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 0, "delete": 0},
 		)
 		account = next(row for row in cashier_rows if row["parent"] == "Account")
