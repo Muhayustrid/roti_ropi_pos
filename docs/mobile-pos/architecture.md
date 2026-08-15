@@ -9,14 +9,16 @@
 
 ## Context
 
-- **Verified**: The bench contains Frappe `16.27.1`, ERPNext `16.28.0`, `bakery_manufacturing` `0.0.1`, and `roti_ropi_pos` `0.0.1`.
+- **Verified**: The bench contains Frappe `16.27.1`, ERPNext `16.28.0`, `stock_additional` `0.0.1`, `selling_additional` `0.0.1`, `bakery_manufacturing` `0.0.1`, and `roti_ropi_pos` `0.0.1`.
 - **Verified**: `roti_ropi_pos` is an installed but otherwise minimal Frappe app. It has no Mobile POS API or custom DocType yet.
 - **Verified**: `POSERPNext` is a separate Android project containing only a generated Jetpack Compose starter UI. It has no networking, persistence, or POS workflow implementation.
 - **Verified**: No approved Android implementation plan currently exists at `/Users/rotiropi/DockerERPNext/POSERPNext/docs/mobile-pos/implementation-plan.md`.
 - **Approved**: The generated Compose starter is not the approved application architecture. Android implementation uses Kotlin, XML Views, ViewBinding, and minSdk 23; Jetpack Compose requires separate explicit approval.
 - **Approved**: Android implementation remains blocked until a separate plan at that path is written and explicitly approved.
-- **Verified**: ERPNext owns the accounting, stock, POS Profile, POS Opening Entry, POS Invoice, POS Closing Entry, pricing, tax, payment, serial, and batch records.
-- **Verified**: `bakery_manufacturing` owns bakery-specific behavior, including Price Group synchronization and the batch barcode UOM enrichment.
+- **Verified**: ERPNext owns accounting, stock, POS Profile, POS Opening Entry, POS Invoice, POS Closing Entry, pricing, tax, payment, serial, and batch records.
+- **Verified**: `stock_additional` owns Item custom UOM and barcode scanner overrides (`stock_additional.overrides.barcode_scanner.custom_scan_barcode`).
+- **Proposed**: `selling_additional` will own Price Group synchronization and walk-in selling custom fields (`custom_walk_in_customer_name`) after the selling cutover; both are currently owned by `bakery_manufacturing`.
+- **Verified**: `bakery_manufacturing` retains manufacturing behavior and temporary backward-compatibility shims.
 
 ## Goals
 
@@ -32,7 +34,7 @@
 
 - **Proposed**: Do not duplicate ERPNext ledgers, stock calculations, pricing rules, tax calculations, or POS consolidation logic.
 - **Proposed**: Do not create an offline accounting engine. The Android client may retain a pending request for retry, but ERPNext remains authoritative.
-- **Proposed**: Do not import private functions from `bakery_manufacturing`; integrate through its registered ERPNext override or an explicitly public function if one is added later.
+- **Proposed**: Do not import private functions from `stock_additional` or `selling_additional`; integrate through registered ERPNext overrides or an explicitly public function if one is added later.
 - **Proposed**: Do not modify files under `apps/erpnext` or `apps/frappe`.
 - **Proposed**: Do not include the approved Price Group sidebar migration in Mobile POS implementation work.
 - **Approved**: V1 has no health endpoint. Adding one requires an explicitly approved backend contract and task.
@@ -45,7 +47,7 @@
 flowchart LR
     A[POSERPNext Android] -->|HTTPS /api/method/roti_ropi_pos.api.v1| B[roti_ropi_pos facade]
     B -->|documents and public services| C[ERPNext POS]
-    B -->|registered scan override| D[bakery_manufacturing]
+    B -->|effective hooks| D[stock_additional]
     C --> E[(MariaDB)]
     C --> F[Background workers]
     D --> C
@@ -55,7 +57,7 @@ flowchart LR
 - **Proposed**: `roti_ropi_pos` authenticates the Frappe user, authorizes the operation, validates the request, handles idempotency, and maps stable API objects to ERPNext documents.
 - **Approved**: Dedicated mobile users receive only the minimal `Mobile POS Cashier` application role. A Frappe `auth_hook` rejects legacy `cmd`, restricts exact routes, enforces PKCE S256 on authorize/approve, and verifies every v1 Bearer token belongs to the configured Mobile POS OAuth Client and an enabled cashier.
 - **Verified**: ERPNext POS Closing Entry submission may enqueue consolidation when at least ten invoices are involved. A successful close request therefore does not always mean consolidation has completed.
-- **Proposed**: `bakery_manufacturing` remains the owner of Price Group and batch-UOM policy; `roti_ropi_pos` consumes resulting POS Profile price lists and the effective `scan_barcode` override.
+- **Proposed**: `stock_additional` owns Item custom UOM and scanner behavior; `selling_additional` will own Price Group and walk-in selling behavior after selling cutover; `roti_ropi_pos` consumes the effective hooks and resulting POS Profile values.
 
 ## Backend Components
 
@@ -92,7 +94,7 @@ flowchart LR
 ### Catalog and Scan
 
 1. **Proposed**: Catalog results are scoped to an authorized POS Profile and expose display data only.
-2. **Proposed**: Scan resolves `erpnext.stock.utils.scan_barcode` through `frappe.override_whitelisted_method()` before calling it, so the registered `bakery_manufacturing` override enriches batch scans with the configured UOM.
+2. **Proposed**: Scan resolves `erpnext.stock.utils.scan_barcode` through `frappe.override_whitelisted_method()` before calling it, so the registered `stock_additional` override enriches batch scans with the configured UOM.
 3. **Verified**: A barcode result identifies an item, serial, or batch but does not establish sufficient saleable stock.
 4. **Proposed**: Before sale submission, the facade rebuilds item details, prices, conversion factors, taxes, warehouse, and stock-sensitive fields server-side.
 
@@ -107,7 +109,7 @@ flowchart LR
 6. **Approved**: The explicit `POS Profile.customer` must pass the same existence, enabled, read-permission, and Customer Group predicate checks as any explicitly selected Customer. An invalid configured default produces `PROFILE_CONFIGURATION_INVALID`.
 7. **Approved**: Quote passes profile Company and Customer context to ERPNext but remains non-authoritative. Sale or return submission is the authoritative enforcement point for account, Company, and internal-party compatibility.
 8. **Approved**: Omitting `customer` resolves to the authorized POS Profile's default walk-in Customer.
-9. **Approved**: `walk_in_customer_name` is accepted only for that default walk-in Customer and is stored through the existing bakery custom field boundary.
+9. **Approved**: `walk_in_customer_name` is accepted only for that default walk-in Customer and is stored through the existing `selling_additional` custom field boundary.
 10. **Approved**: Search, quote, sale, and return endpoints never create a Customer record.
 
 ### Submit Sale
@@ -144,7 +146,7 @@ flowchart LR
 
 ## Deployment Shape
 
-- **Proposed**: `roti_ropi_pos` deploys as a normal private-bench Frappe app on the same bench as ERPNext and `bakery_manufacturing`.
+- **Proposed**: `roti_ropi_pos` deploys as a normal private-bench Frappe app on the same bench as ERPNext, `stock_additional`, and `selling_additional`.
 - **Proposed**: No separate database or API gateway is introduced for v1. The Frappe auth hook is the mobile route gate, and ERPNext's existing workers remain responsible for queued closing consolidation.
 - **Inferred**: Same-process integration is the least risky initial architecture because ERPNext document submission must remain transactional.
 
@@ -153,7 +155,7 @@ flowchart LR
 - **Approved**: Android authentication is OAuth 2.0 Authorization Code with mandatory PKCE S256, individual cashier identity, and no embedded secret.
 - **Approved**: `Mobile POS Cashier` replaces broad Accounts/Sales Manager role requirements for the app lifecycle through explicit Custom DocPerm and endpoint checks.
 - **Approved**: MVP invoices must be fully settled; partial payment is post-MVP.
-- **Approved**: Registered-customer search, POS Profile default walk-in Customer, and optional bakery walk-in display name are supported without Customer auto-creation.
+- **Approved**: Registered-customer search, POS Profile default walk-in Customer, and optional `selling_additional` walk-in display name are supported without Customer auto-creation.
 - **Approved**: MVP supports POS Invoice mode only and returns `UNSUPPORTED_POS_MODE` for any other configuration.
 - **Approved**: Idempotency records have a 90-day terminal retention policy with recovery and audit holds.
 - **Approved**: Mobile sale cancellation is outside the cashier MVP and does not block Backend Phase 1.

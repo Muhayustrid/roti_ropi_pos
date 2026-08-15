@@ -13,8 +13,9 @@ Read this file before changing this repository. These rules apply to the entire 
 ## Ownership and Boundaries
 
 - `roti_ropi_pos` owns the versioned Mobile POS backend API, authorization boundary, stable DTOs/errors, idempotency, and ERPNext POS orchestration.
-- `bakery_manufacturing` owns manufacturing behavior, Price Group synchronization, batch default-UOM behavior, and the existing walk-in display-name customization.
-- Integrate with `bakery_manufacturing` only through registered hooks, persisted ERPNext data, or an explicitly public contract. Do not import private bakery helpers.
+- `stock_additional` owns Item custom UOM and barcode scanner behavior; `selling_additional` owns Price Group and walk-in selling behavior.
+- `bakery_manufacturing` retains manufacturing behavior and temporary documented shims.
+- Integrate with extracted apps only through registered hooks, persisted ERPNext data, or explicitly public contracts. Do not import private helpers.
 - ERPNext remains the source of truth for POS Profile, Customer, opening, POS Invoice, returns, closing, pricing, taxes, payments, stock, serials, batches, and accounting.
 - Never edit files under `apps/erpnext` or `apps/frappe`. Use supported app hooks, Custom DocPerm, fixtures, controller overrides, or whitelisted app methods.
 - The Android client is a separate repository at `/Users/rotiropi/DockerERPNext/POSERPNext` and must consume only documented Mobile POS API contracts.
@@ -27,7 +28,7 @@ Read this file before changing this repository. These rules apply to the entire 
 - Partially paid invoices are post-MVP.
 - Search and select existing enabled registered Customers through a permission-aware endpoint.
 - Omitted customer selection resolves to the assigned POS Profile default walk-in Customer.
-- Accept an optional walk-in display name only for that default walk-in Customer and map it to bakery's existing `custom_walk_in_customer_name` boundary.
+- Accept an optional walk-in display name only for that default walk-in Customer and map it to `selling_additional`'s existing `custom_walk_in_customer_name` boundary.
 - Never create a Customer from search, quote, scan, sale, return, or recovery requests.
 - Cashier corrections use POS Invoice returns. Mobile cancellation is outside the cashier MVP; manager cancellation remains an ERPNext Desk workflow.
 
@@ -92,7 +93,7 @@ Read this file before changing this repository. These rules apply to the entire 
 - Run the full app gate with `bench --site development.localhost run-tests --app roti_ropi_pos`.
 - Run `pre-commit run --all-files` from `apps/roti_ropi_pos`.
 - Test OAuth PKCE S256, exact role permissions, route denial, cross-user/company isolation, customer behavior, full settlement, stock/batch/serial validation, idempotent concurrency, returns, synchronous closing, queued closing, and safe 90-day cleanup.
-- Run relevant bakery and ERPNext regression modules when their boundaries are exercised.
+- Run relevant `stock_additional`, `selling_additional`, and ERPNext regression modules when their boundaries are exercised.
 - Do not claim completion without fresh command output and a clean review of the intended diff.
 
 ## Skills and Navigation

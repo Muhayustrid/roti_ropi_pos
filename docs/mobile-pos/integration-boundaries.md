@@ -19,8 +19,8 @@
 | Opening Entry | ERPNext | Create/submit through its controller | **Verified / Proposed** |
 | POS Invoice and returns | ERPNext | Build and submit core documents; do not reproduce controller logic | **Verified / Proposed** |
 | Closing and consolidation | ERPNext | Submit Closing Entry; never call merge helpers directly | **Verified / Proposed** |
-| Price Group | `bakery_manufacturing` | Consume the generated Price List through POS Profile | **Verified / Proposed** |
-| Batch default UOM | `bakery_manufacturing` | Use effective `scan_barcode`; do not import `resolve_batch_uom` | **Verified / Proposed** |
+| Price Group | `selling_additional` (target; currently `bakery_manufacturing`) | Consume the generated Price List through POS Profile | **Proposed** |
+| Batch default UOM | `stock_additional` | Use effective `scan_barcode`; do not import a private resolver | **Verified / Proposed** |
 | Mobile UI and local retry queue | `POSERPNext` | Persist pending idempotent requests, not ERPNext ledgers | **Proposed** |
 | Authoritative cart payable | `roti_ropi_pos` | Android must read the snapshot from `v1.sales.quote_cart`; per-item quotes never sum to a payable | **Approved** |
 | Exact sale settlement | `roti_ropi_pos` | Backend enforces `sum == payable` before insert/submit; Android never computes change | **Approved** |
@@ -66,28 +66,30 @@
 - **Approved**: A configured default that fails those checks returns `PROFILE_CONFIGURATION_INVALID`; profile origin never bypasses Customer eligibility.
 - **Approved**: Mobile POS never creates or modifies a Customer during search, quote, scan, sale, return, or recovery.
 
-## `bakery_manufacturing` Boundary
+## Extracted App Boundaries
+
+- **Verified**: `bakery_manufacturing` retains manufacturing behavior and temporary backward-compatibility shims.
+- **Verified**: The current Selling sidebar injection is implemented in `bakery_manufacturing.after_migrate`.
+- **Approved**: The future `extend_bootinfo` sidebar replacement is a separate bakery task and is not a Mobile POS Phase 1 blocker.
 
 ### Price Group
 
-- **Verified**: `PriceGroup.on_update` creates or updates a selling Price List, synchronizes Item Price rows, and assigns that list to POS Profiles matching configured company/warehouse outlets.
+- **Proposed**: `selling_additional` will own Price Group synchronization after the selling cutover; `bakery_manufacturing` currently creates/updates selling Price Lists and assigns them to POS Profiles matching configured company/warehouse outlets.
 - **Proposed**: Mobile POS reads the resulting `POS Profile.selling_price_list`; it does not query Price Group to calculate prices.
 - **Proposed**: Price Group creation, maintenance, and sidebar exposure remain outside `roti_ropi_pos`.
-- **Verified**: The current sidebar injection is implemented in `bakery_manufacturing.after_migrate`.
-- **Approved**: The future `extend_bootinfo` sidebar replacement is a separate bakery task and is not a Mobile POS Phase 1 blocker.
 
 ### Batch UOM
 
-- **Verified**: `bakery_manufacturing` overrides `erpnext.stock.utils.scan_barcode` with `custom_scan_barcode(search_value, ctx)`.
+- **Verified**: `stock_additional` overrides `erpnext.stock.utils.scan_barcode` with `custom_scan_barcode(search_value, ctx)`.
 - **Verified**: For batch scans, the override reads Item `custom_default_uom_warehouse` and may add `uom`, `conversion_factor`, and a warning.
-- **Proposed**: Mobile POS passes the ERPNext method path through `frappe.override_whitelisted_method()` and then resolves the returned path, matching Frappe's request dispatcher and selecting the bakery implementation.
+- **Proposed**: Mobile POS passes the ERPNext method path through `frappe.override_whitelisted_method()` and then resolves the returned path, selecting `stock_additional.overrides.barcode_scanner.custom_scan_barcode`.
 - **Proposed**: Mobile POS maps a server warning into its own warning array rather than depending on Desk `frappe.msgprint` behavior.
 - **Proposed**: Mobile POS must still verify batch quantity, expiry, warehouse, and item detail before submission.
 
 ### Recent Orders
 
-- **Verified**: `bakery_manufacturing` overrides `get_past_order_list` to include `custom_walk_in_customer_name`.
-- **Approved**: Mobile POS preserves `custom_walk_in_customer_name` for POS Invoice responses and accepts it only when the selected Customer is the POS Profile default walk-in Customer. It does not import the override's private helpers or add Sales Invoice support.
+- **Proposed**: `selling_additional` will own `custom_walk_in_customer_name` after the selling cutover; currently owned by `bakery_manufacturing`.
+- **Approved**: Mobile POS preserves `custom_walk_in_customer_name` for POS Invoice responses and accepts it only when the selected Customer is the POS Profile default walk-in Customer. It does not import private helpers or add Sales Invoice support.
 
 ## Frappe Boundary
 
@@ -128,14 +130,15 @@
 
 ```text
 POSERPNext -> roti_ropi_pos -> ERPNext/Frappe
-                         -> effective ERPNext overrides registered by bakery_manufacturing
+                         -> effective ERPNext overrides registered by stock_additional / selling_additional
 
-bakery_manufacturing -X-> roti_ropi_pos
+stock_additional     -X-> roti_ropi_pos
+selling_additional   -X-> roti_ropi_pos
 ERPNext/Frappe       -X-> roti_ropi_pos
 ```
 
-- **Proposed**: Declare both ERPNext and `bakery_manufacturing` as required apps before the first Mobile POS schema/fixture migration because POS transactions and bakery batch-UOM/Price Group behavior are business-critical v1 dependencies.
-- **Proposed**: Activating this declaration belongs to Backend Phase 2 before Task 2's first migration, not to the later authentication task.
+- **Proposed**: `roti_ropi_pos.hooks.required_apps` declares `["erpnext", "stock_additional"]`. `selling_additional` is added only after its target fixture and hooks exist for the selling cutover.
+- **Proposed**: Activating a required-app declaration belongs to the phase before the first migration that depends on it, not to a later authentication task.
 
 ## Upgrade Discipline
 
@@ -145,9 +148,9 @@ ERPNext/Frappe       -X-> roti_ropi_pos
 
 ## Source Evidence
 
-- **Verified**: `bakery_manufacturing/hooks.py:10-23`
-- **Verified**: `bakery_manufacturing/overrides/barcode_scanner.py:6-57`
-- **Verified**: `bakery_manufacturing/overrides/pos_overrides.py:9-50`
-- **Verified**: `bakery_manufacturing/bakery_manufacturing/doctype/price_group/price_group.py:5-231`
+- **Verified**: `stock_additional/hooks.py:14-16` and `stock_additional/overrides/barcode_scanner.py:1-20`
+- **Verified**: `stock_additional/uom.py` and `stock_additional/exceptions.py`
+- **Proposed**: `selling_additional/hooks.py:11` currently declares only `required_apps = ["erpnext"]`; it owns no Price Group or walk-in boundary yet.
+- **Verified**: `bakery_manufacturing/hooks.py:10-36`, `bakery_manufacturing/overrides/barcode_scanner.py:1-9`, `bakery_manufacturing/overrides/pos_overrides.py:9-50`, and `bakery_manufacturing/bakery_manufacturing/doctype/price_group/price_group.py:5-231`
 - **Verified**: `frappe/handler.py:65-86`
 - **Verified**: `frappe/model/document.py:431-587,1112-1150`
