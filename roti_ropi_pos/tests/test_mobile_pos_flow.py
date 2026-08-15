@@ -147,9 +147,17 @@ class TestMobilePOSLifecycle(IntegrationTestCase):
 			return sales_api.submit()
 
 	def _close_session(self, idem_key: str) -> dict:
+		preview_data = closing_api.preview(pos_profile=self.profile.name)["data"]
 		payload = {
 			"pos_profile": self.profile.name,
-			"closing_balances": [{"mode_of_payment": "Cash", "closing_amount": "500100"}],
+			"preview_id": preview_data["preview_id"],
+			"closing_balances": [
+				{
+					"mode_of_payment": row["mode_of_payment"],
+					"closing_amount": row["expected_amount"],
+				}
+				for row in preview_data["expected_payments"]
+			],
 		}
 		# frappe.in_test executes enqueue synchronously; patch consolidation so
 		# the lifecycle test never runs create_merge_logs (ERPNext's own suite tests that).
@@ -298,7 +306,7 @@ class TestMobilePOSLifecycle(IntegrationTestCase):
 		# Catalog may return empty for Website User with limited perms in test DB;
 		# the per-item permission model is covered by test_catalog.py.
 
-		# --- Phase 6: bakery batch-UOM scan through effective Frappe override ---
+		# --- Phase 6: stock batch-UOM scan through effective Frappe override ---
 		frappe.local.form_dict = frappe._dict({"pos_profile": self.profile.name, "value": self._batch_no})
 		scan_result = catalog_api.scan()
 		self.assertTrue(scan_result["ok"], scan_result)
@@ -360,9 +368,7 @@ class TestMobilePOSLifecycle(IntegrationTestCase):
 			"reason": "Customer changed mind",
 			"items": [{"source_item_row": row_id, "qty": "1"}],
 		}
-		frappe.local.form_dict = frappe._dict(
-			{"source_name": sale_name, "items": return_payload["items"]}
-		)
+		frappe.local.form_dict = frappe._dict({"source_name": sale_name, "items": return_payload["items"]})
 		return_quote = sales_api.quote_return()
 		self.assertTrue(return_quote["ok"], return_quote)
 		self.assertEqual(

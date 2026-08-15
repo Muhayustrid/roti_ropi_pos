@@ -87,8 +87,10 @@ class TestCustomers(IntegrationTestCase):
 			with self.subTest(query=query):
 				rows = search_customers(self.profile, query)["customers"]
 				self.assertIn(target, [row["name"] for row in rows])
-		default_row = search_customers(self.profile, "Walk In Customer")["customers"][0]
+		rows = search_customers(self.profile, "Walk In Customer")["customers"]
+		default_row = next(row for row in rows if row["name"] == default)
 		self.assertTrue(default_row["is_default_walk_in"])
+		self.assertTrue(all(not row["is_default_walk_in"] for row in rows if row["name"] != default))
 
 	def test_search_is_bounded_and_excludes_disabled(self):
 		disabled = self._set_customer(1, label="Disabled Customer", disabled=1)
