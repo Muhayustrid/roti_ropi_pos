@@ -1,10 +1,10 @@
 # PROJECT_STATE.md — AI session resume checkpoint
 
-**Last updated:** 2026-08-16, after the authorized final migrate of `selling-cutover.localhost` and
-its verification pass.
-**Resume point:** Phase 2 is complete and the cutover site is migrated and fully green (zero RED
-tests). Still open and still unapproved: the commit-approval window for the Phase 2 implementation
-diffs, and Phase 3.
+**Last updated:** 2026-08-17, after Phase 2 was packaged and committed in all three implementation
+repositories.
+**Resume point:** Phase 2 is complete, the cutover site is migrated and green, and every intended
+Phase 2 change is committed. The only remaining boundary is Phase 3 approval — NOT started, NOT
+approved. Nothing has been pushed.
 
 This file is the current-state save game, not a history. Git, tests, and the live site override it.
 If it conflicts with verified evidence, fix this file.
@@ -34,15 +34,16 @@ spec does not state.
 |---|---|---|
 | 0 — app shells | `docs/superpowers/plans/2026-08-14-additional-app-shells.md` | Complete |
 | 1 — stock cutover | `docs/superpowers/plans/2026-08-14-stock-additional-cutover.md` | Complete and closed |
-| 2 — selling cutover | `docs/superpowers/plans/2026-08-14-selling-additional-cutover.md` | **Complete — all 12 tasks, final gate, independent review, and the authorized cutover-site migrate all passed** |
+| 2 — selling cutover | `docs/superpowers/plans/2026-08-14-selling-additional-cutover.md` | **Complete — all 12 tasks, final gate, independent review, the authorized cutover-site migrate, and packaging/commit all passed** |
 | 3 — production rollout | `docs/superpowers/plans/2026-08-14-app-ownership-rollout.md` | Not started, not approved |
 
 Execution ledger (authoritative per-task record, including every ruling):
 `.superpowers/sdd/2026-08-14-selling-additional-cutover/progress.md`. Every Phase 2 task
 (1 through 12) carries a `## Task <N>: complete` line there, plus the final-gate and reviewer
-record ("Phase 2 final gate and independent review") and the closure record
-("Phase 2 closure — final authorized migrate on `selling-cutover.localhost`", including Ruling AJ).
-Per-task briefs, dispatch notes, and implementer reports live beside it.
+record ("Phase 2 final gate and independent review"), the closure record
+("Phase 2 closure — final authorized migrate on `selling-cutover.localhost`", including Ruling AJ),
+and the packaging record ("Phase 2 packaging — Ruling AH resolved, implementation committed in three
+repos"). Per-task briefs, dispatch notes, and implementer reports live beside it.
 
 ---
 
@@ -198,22 +199,31 @@ Two test modules were repaired during closure (Ruling AJ): `test_sidebar_cleanup
 constant. They now construct the row they judge and assert exact identities. Test-side only; no
 production change; both mutations still caught.
 
-Working trees (**nothing implementation-committed anywhere; nothing pushed**):
+Working trees — **every intended Phase 2 change is committed; nothing is pushed**:
 
-- `selling_additional`: ` M hooks.py`, ` M patches.txt`, ` M tests/test_shell_contract.py` + the
-  Phase 2 untracked set (migration/, patches/v1_0/, fixtures/, overrides/, ownership.py,
-  doctype/, workspace JSONs, public/js, tests/*).
-- `bakery_manufacturing`: staged handoff by name (3 M + 14 D); unstaged ` M .pre-commit-config.yaml`
-  (bundle hook exclusion), ` M bakery_manufacturing.bundle.js` (protected suffix, `8b0431…`,
-  `14 1`), ` M tests/test_barcode_scanner_shim.py` (ruff autoformat, semantics identical);
-  untracked protected `tests/test_desk_sidebar.py`, `diference.md` (operator doc — keep out of any
-  staging), `graphify-out/`.
-- `roti_ropi_pos`: unstaged Phase 2 files (`hooks.py`, `tests/test_source_contracts.py`,
-  `README.md`, `PROJECT_STATE.md`) + pre-existing unrelated edits (spec status line,
-  `tests/test_sales.py` teardown) that stay uncommitted; untracked tooling/plan dirs.
-- `apps/erpnext`: exactly ` M banking/yarn.lock`, `?? .codegraph/`, `?? graphify-out/` — the
-  sidebar leak is gone and `erpnext/workspace_sidebar/selling.json` has no diff.
-  `apps/frappe`: only untracked tool dirs.
+| Repo | Branch | Phase 2 commit | Paths |
+| --- | --- | --- | --- |
+| `selling_additional` | `feat/inactive-shell` | `0c45021` `feat: own Price Group, walk-in selling, and POS past orders` | 45 (3 M + 42 A) |
+| `bakery_manufacturing` | `claude/instruction-guidance-20260810014002` | `f1aa55b` `refactor: hand selling ownership to selling_additional` | 20 (6 M + 14 D) |
+| `roti_ropi_pos` | `patch/catalog-item-group-fallback` | `78a0708` `feat: depend on selling_additional and pin its contracts` | 3 M |
+
+Documentation commits: `stock_additional` `d94f5bf`, `8422130`; `selling_additional` `5a11fd1`,
+`2da49a6`; `roti_ropi_pos` `ccffc19`, `85302d2`, plus this checkpoint update.
+
+Deliberate local overlays that stay uncommitted on purpose:
+
+- `bakery_manufacturing/public/js/bakery_manufacturing.bundle.js` — the 14-line operator prototype,
+  `8b04313861b211aa17cb4d0c87c372d32e2f8b0d642b94292e58a7865ae1bbf1`, `git diff --numstat` = `14 0`
+  against the now-empty HEAD blob. **Per Ruling AH (resolved as Option B) this file is carried to a
+  deployment by the rollout overlay, never by Git.** Do not commit it and do not let a formatter
+  touch it; the pre-commit hooks exclude that exact path.
+- `bakery_manufacturing/bakery_manufacturing/tests/test_desk_sidebar.py` (untracked in every ref),
+  `diference.md`, `graphify-out/` — protected or pre-existing operator artifacts.
+- `roti_ropi_pos`: the extraction-design status line and the `tests/test_sales.py` teardown edit,
+  plus untracked plan files and `skills-lock.json`.
+- `apps/erpnext`: ` M banking/yarn.lock` and tool dirs only; `erpnext/workspace_sidebar/selling.json`
+  has no diff. `apps/frappe`: tool dirs only. Neither core repo received a Phase 2 commit.
+- Tooling output everywhere: `.codegraph/`, `.claude/`, `.agents/`.
 
 Scratch sites created by Task 12 (safe to keep for evidence; safe to drop with approval):
 `selling-fresh.localhost` (fresh-install proof), `selling-upgrade.localhost` (populated-upgrade
@@ -227,11 +237,15 @@ rehearsal restore source).
 
 ## 7. Open items and deferred findings (none block Phase 2 closure)
 
-1. **Ruling AH — bundle staging decision.** Plan Task 10 Step 10's mandated staged diff ("exactly
-   the import removal" with the 14 lines unstaged) implies an empty committed bundle, which its own
-   objection 1 rejects; plain `git add` would stage the protected lines, which the same step
-   forbids. The bundle is left UNSTAGED; the commit-approval window must choose: commit the 14
-   lines, commit an empty bundle, or keep the bundle as a per-checkout overlay (rollout language).
+1. **Ruling AH — RESOLVED as Option B.** The committed bundle blob is empty: the commit removes only
+   the tracked `import "./pos_walk_in_customer.js";` line, applied index-only with `git apply
+   --cached` so the worktree was never touched. The operator's 14-line prototype stays an uncommitted
+   overlay and reaches deployments through the rollout's overlay step. The objection that an empty
+   blob would break `test_desk_sidebar.py` on a fresh checkout does not apply — that test is untracked
+   in every ref, so a fresh clone has neither the test nor the prototype. Committing the 14 lines
+   (Option A) would publish operator-local work and break the rollout's bundle-excluded manifest;
+   leaving the bundle at HEAD (Option C) would ship an import pointing at a file the same commit
+   deletes.
 2. Deferred Minor findings (recorded in the ledger's final-gate section): double `recovery_map.load()`
    inside `execute()`; sidebar parent matching without an `app` filter; `diference.md` inventory.
 3. Visual Desk smoke (input rendering, no-timer on other routes, sidebar appearance) deferred to
@@ -251,19 +265,17 @@ rehearsal restore source).
   not ours.
 - Roti's spec status line and `test_sales.py` teardown edit stay deliberately uncommitted.
 
-Committed so far — documentation only, nothing pushed: `stock_additional` `d94f5bf` and `8422130`,
-`selling_additional` `5a11fd1` and `2da49a6`, roti checkpoint + AGENTS/CLAUDE at `ccffc19`.
-**No Phase 2 implementation work is committed in any app. No branch has been pushed.** A session
-opened by stating the commit window was finished; Git contradicted that, and the discrepancy is
-recorded in the ledger's closure record rather than reconciled — commit approval is still OPEN.
+Phase 2 implementation is committed in all three implementation repositories (`0c45021`, `f1aa55b`,
+`78a0708` — see §6 for branches and path counts), alongside the documentation commits listed there.
+**No branch has been pushed.** `stock_additional`, `erpnext`, and `frappe` received no Phase 2 commit.
 
 ---
 
 ## 9. Authorization boundaries (unchanged — no new authority granted)
 
-- No commit, push, tag, deploy, or Phase 3 rollout without separate explicit approval per phase.
-  The Task 6-7 migrate approval and the 2026-08-16 final-migrate approval on
-  `selling-cutover.localhost` are both SPENT; any further migrate needs its own approval.
+- No push, tag, deploy, or Phase 3 rollout without separate explicit approval per phase. The Task 6-7
+  migrate approval, the 2026-08-16 final-migrate approval on `selling-cutover.localhost`, and the
+  Phase 2 commit approval are all SPENT; any further migrate or a first push needs its own approval.
 - `bench run-patch --force` runs only on dedicated/scratch sites, by the controller, never on an
   active site (`development.localhost` never).
 - `sites/apps.txt` and site config are protected from agent edits.
@@ -279,18 +291,19 @@ recorded in the ledger's closure record rather than reconciled — commit approv
 
 ## 10. Resume here
 
-Phase 2 is complete and closed on the cutover site: all twelve tasks, the final gate, the independent
-review, and the authorized `selling-cutover.localhost` migrate have passed. That site now shows zero
-RED tests, `preflight final` clean, selling owning the three DocTypes and every moved hook, its own
-navigation imported, and ERPNext's `Selling` sidebar free of the legacy Price Group row with nothing
-left to recreate it. Do NOT restart any Phase 2 task, do NOT re-run its investigations, and do NOT
-begin Phase 3.
+Phase 2 is complete, closed on the cutover site, and packaged. All twelve tasks, the final gate, the
+independent review, the authorized `selling-cutover.localhost` migrate, and the per-repository
+implementation commits have passed. `selling-cutover.localhost` shows zero RED tests, `preflight
+final` clean, selling owning the three DocTypes and every moved hook, its own navigation imported,
+and ERPNext's `Selling` sidebar free of the legacy Price Group row with nothing left to recreate it.
+Ruling AH is resolved (§7.1). No Phase 2 implementation change remains uncommitted; nothing is
+pushed.
 
-Next authorized step, in order:
+Do NOT restart any Phase 2 task, do NOT re-run its investigations, and do NOT begin Phase 3.
 
-1. **Commit-approval window** (plan Task 10 Step 11 / Task 12 Step 8) — still open and unspent. The
-   user reviews the staged and unstaged diffs per repository and grants or withholds commit approval
-   per repo. Resolve Ruling AH's bundle decision first (see §7.1). Staging is strictly by exact path;
-   keep `diference.md`, `test_desk_sidebar.py`, the roti spec-status line, and `test_sales.py` out.
-2. After commits: the user decides whether to begin Phase 3 (rollout plan, separately approved).
-   Phase 3 is NOT started and NOT approved.
+The single remaining boundary is **Phase 3 approval**. Phase 3 is NOT started and NOT approved. When
+the user grants it, work from `docs/superpowers/plans/2026-08-14-app-ownership-rollout.md`; its
+protected-path expectations must be re-measured first, because Step 4 still predicts the pre-packaging
+bundle shape (hash `72ce8f92…`, numstat `14 0` against a one-line HEAD blob) while HEAD's blob is now
+empty and the same numstat means something different. Push, tag, deploy, any further migrate, and
+active-site install each need their own explicit approval.
