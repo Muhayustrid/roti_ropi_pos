@@ -5,6 +5,8 @@ Mobile POS backend integration for ERPNext
 ### Requirements
 
 - Frappe/ERPNext v16 with `stock_additional` installed (owns Item custom UOM and the barcode scanner override).
+- Frappe/ERPNext v16 with `selling_additional` installed (owns Price Group, walk-in selling behavior, the POS past-order override, and its Workspace/sidebar navigation).
+- `bakery_manufacturing` retains only manufacturing behavior: the Serial and Batch Bundle override plus documented temporary compatibility shims.
 - **POS Settings > Invoice Type** set to **POS Invoice**.
 - Dedicated cashier users with only the `Mobile POS Cashier` application role.
 - Public OAuth Client configured for Authorization Code, response Code, token endpoint authentication method `None`, scope `all`, `skip_authorization = 0`, allowed role `Mobile POS Cashier`, and an approved redirect URI.

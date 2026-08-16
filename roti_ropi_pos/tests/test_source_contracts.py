@@ -10,7 +10,9 @@ to grep in CI output.
 
 from __future__ import annotations
 
+import ast
 import inspect
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -252,7 +254,16 @@ class TestAppHooks(IntegrationTestCase):
 
 		self.assertEqual(
 			hooks.required_apps,
-			["erpnext", "stock_additional"],
+			["erpnext", "stock_additional", "selling_additional"],
+		)
+
+	def test_effective_past_order_provider_is_selling_additional(self):
+		self.assertEqual(
+			frappe.override_whitelisted_method(
+				"erpnext.selling.page.point_of_sale.point_of_sale.get_past_order_list"
+			),
+			"selling_additional.overrides.pos_overrides.custom_get_past_order_list",
+			"SOURCE CONTRACT: past-order override no longer owned by selling_additional",
 		)
 
 	def test_auth_hook_registered(self):
@@ -356,6 +367,36 @@ class TestAppHooks(IntegrationTestCase):
 			job.assert_called_once_with("SOURCE-CONTRACT-CLO")
 
 
+class TestNoPrivateSellingImports(IntegrationTestCase):
+	"""roti consumes selling_additional only through effective hooks and stable Frappe APIs."""
+
+	def test_no_private_selling_additional_imports(self):
+		app_path = Path(frappe.get_app_path("roti_ropi_pos"))
+		offenders = []
+		for source_path in app_path.rglob("*.py"):
+			if "__pycache__" in source_path.parts:
+				continue
+			tree = ast.parse(source_path.read_text())
+			relative = source_path.relative_to(app_path)
+			for node in ast.walk(tree):
+				if isinstance(node, ast.Import):
+					for alias in node.names:
+						if alias.name == "selling_additional" or alias.name.startswith("selling_additional."):
+							offenders.append(f"{relative}: import {alias.name}")
+				elif isinstance(node, ast.ImportFrom):
+					module = node.module or ""
+					if module == "selling_additional" or module.startswith("selling_additional."):
+						names = ", ".join(alias.name for alias in node.names)
+						offenders.append(f"{relative}: from {module} import {names}")
+		self.assertEqual(
+			offenders,
+			[],
+			"SOURCE CONTRACT: roti_ropi_pos must not import selling_additional helpers or "
+			"exception types; integrate through effective hooks, persisted ERPNext data, or "
+			"public contracts",
+		)
+
+
 class TestRequiredDocTypeFields(IntegrationTestCase):
 	"""Custom fields our services read/write must exist on installed DocTypes."""
 
@@ -371,11 +412,12 @@ class TestRequiredDocTypeFields(IntegrationTestCase):
 		)
 
 	def test_pos_invoice_has_walk_in_customer_name_field(self):
-		self.assertTrue(
-			self._field_exists("POS Invoice", "custom_walk_in_customer_name"),
-			"SOURCE CONTRACT: custom_walk_in_customer_name missing on POS Invoice — "
-			"run bench migrate or check fixtures",
-		)
+		for doctype in ("POS Invoice", "Sales Invoice"):
+			self.assertTrue(
+				self._field_exists(doctype, "custom_walk_in_customer_name"),
+				f"SOURCE CONTRACT: custom_walk_in_customer_name missing on {doctype} — "
+				"run bench migrate or check fixtures",
+			)
 
 	def test_pos_opening_entry_has_transaction_id_field(self):
 		self.assertTrue(
