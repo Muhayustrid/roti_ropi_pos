@@ -10,6 +10,41 @@ Read this file before changing this repository. These rules apply to the entire 
 - Verify the installed Frappe and ERPNext source before relying on a core method, field, hook, permission, or side effect.
 - After a task or phase is confirmed complete (all tests pass, committed, pushed), update its **Status** line in `docs/mobile-pos/implementation-plan.md` to `**Complete** ✅ (<commit message> — commit <hash>)`. Do this in the same session before closing, no separate approval needed.
 
+## Session State and Continuity
+
+`PROJECT_STATE.md` at the app root is the authoritative resume checkpoint. It carries current state
+only — objective, roadmap, verified ownership, contracts, active task, blockers, and the exact resume
+instruction. Historical detail stays in Git, task reports, plans, and execution ledgers.
+
+### Session startup
+
+1. Read this file.
+2. Read `PROJECT_STATE.md`.
+3. Check `git status` in every app the active task touches.
+4. Inspect the current branch, `HEAD`, and diff as appropriate.
+5. Read the implementation plan or spec section that controls the active task.
+6. Use CodeGraph first for focused navigation where it applies.
+7. Continue from the recorded checkpoint. Do not repeat completed investigation.
+
+Git, executable tests, and current repository state override the checkpoint. When `PROJECT_STATE.md`
+conflicts with verified evidence, correct the file.
+
+### During implementation
+
+Prefer focused `codegraph_explore` queries, targeted source reads, targeted tests, and the smallest
+correct change over broad repository rescanning. Do not rediscover architecture the checkpoint already
+records.
+
+Give a subagent the relevant slice of the current checkpoint plus its task brief. A subagent must not
+rediscover the whole repository, and must not receive accumulated session history.
+
+### Task and phase completion
+
+At the end of every meaningful task or phase, and before ending a long or high-context session:
+update `PROJECT_STATE.md`, replace obsolete current-state text instead of appending to it, record
+verification performed, record blockers and deferred findings, and record the next task. A fresh
+session must be able to resume without conversation history. Trivial edits need no checkpoint update.
+
 ## Ownership and Boundaries
 
 - `roti_ropi_pos` owns the versioned Mobile POS backend API, authorization boundary, stable DTOs/errors, idempotency, and ERPNext POS orchestration.
