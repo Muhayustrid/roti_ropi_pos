@@ -802,6 +802,7 @@ Return quantity uses `return-quantity/v1`: an ASCII decimal-dot string, positive
 - **Approved**: Counted values require ASCII digits with an optional decimal dot and digits on both sides. Whitespace, grouping, exponent notation, signs, `.5`, `1.`, excessive scale, negatives, and storage overflow are rejected. Zero is valid. The original accepted string participates in the Closing request hash.
 - **Approved**: The server persists Opening, expected, counted/closing, and difference for every mode plus invoice references, taxes, grand/net totals, quantity, and total taxes. It does not depend on Desk JavaScript.
 - **Approved**: The endpoint creates/submits through the existing Closing recovery executor and never directly calls merge-log creation helpers.
+- **Approved**: Closing commits its recovery phases (`Reserved`, `DraftCreated`, `SubmitStarted`) so a crashed request stays recoverable from the database alone. Once a phase is committed the response is derived from the persisted Closing state: a failure raised after the Closing Entry became durable returns that Closing (`queued`, `submitted`, or `failed`) instead of an error, and a retry with the same key replays the same Closing. A second Closing Entry is never created for the same Opening. A failure raised while nothing is durable yet keeps its documented rejection code, and an unrecognised failure with nothing durable stays a server error rather than being mapped to a business code.
 
 ```json
 {
@@ -840,6 +841,7 @@ Return quantity uses `return-quantity/v1`: an ASCII decimal-dot string, positive
 - **Approved**: `queued` is accepted but nonterminal. Same-key/same-body submit replay returns the stored initial response even if status later changes; Android polls this endpoint for the terminal receipt.
 - **Approved**: Failed status returns `failure: {"code": "CLOSING_FAILED", "message": "Closing failed. A manager must review it in ERPNext."}` and never returns raw core error details.
 - **Approved**: V1 has no mobile retry/cancel endpoint. A manager reviews failed consolidation or cancellation in ERPNext Desk.
+- **Approved**: Deferred consolidation (`>= 10` invoices) runs after the submission response is already committed. A failure there sets the Closing to `failed`, so Android learns about it by polling this endpoint; it never retroactively turns the committed submission response into an error.
 
 Stable Closing errors include `NO_OPEN_SESSION`, `CLOSING_PREVIEW_STALE`, `CLOSING_PAYMENT_MODE_UNKNOWN`, `CLOSING_PAYMENT_MODE_DUPLICATE`, `CLOSING_PAYMENT_MODE_MISSING`, `CLOSING_DECIMAL_MALFORMED`, `CLOSING_DECIMAL_SCALE_EXCEEDED`, `CLOSING_AMOUNT_OUT_OF_BOUNDS`, `CLOSING_IN_PROGRESS`, `CLOSING_ALREADY_CLOSED`, `PROFILE_SCOPE_MISMATCH`, and `PERMISSION_DENIED`.
 

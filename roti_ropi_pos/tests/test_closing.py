@@ -962,6 +962,194 @@ class TestClosingPreview(IntegrationTestCase):
 				fn()
 			enqueue_mock.assert_called_once()
 
+	# ── transaction boundary (I-1) ───────────────────────────────────────
+
+	def test_expected_error_after_a_durable_phase_never_touches_a_dead_savepoint(self):
+		"""I-1: a commit removes the endpoint savepoint, so it must not be used again.
+
+		Closing commits the `Reserved`, `DraftCreated`, and `SubmitStarted` phases.
+		InnoDB drops every savepoint at commit, so `ROLLBACK TO SAVEPOINT` and
+		`RELEASE SAVEPOINT` both fail afterwards with MariaDB 1305 (measured:
+		`OperationalError(1305, 'SAVEPOINT ... does not exist')`). Attempting them
+		anyway and swallowing the failure is what lets a savepoint error mask the
+		durable closing state.
+		"""
+		self._submit_sale()
+		# Build the payload first: `closing_api.preview` is itself an endpoint with
+		# its own savepoint, and it never commits, so its legitimate release must
+		# not be counted here.
+		payload = self._closing_payload()
+		rolled_back_to = []
+		released = []
+		original_rollback = frappe.db.rollback
+		original_release = frappe.db.release_savepoint
+
+		def record_rollback(*args, **kwargs):
+			rolled_back_to.append(kwargs.get("save_point"))
+			return original_rollback(*args, **kwargs)
+
+		def record_release(save_point):
+			released.append(save_point)
+			return original_release(save_point)
+
+		def still_processing(_scope_key):
+			raise MobilePOSAPIError(
+				"REQUEST_IN_PROGRESS",
+				"Closing is still being processed.",
+				status=409,
+				retryable=True,
+				details={"endpoint": "v1.closing.submit", "retry_after_seconds": 1},
+			)
+
+		with (
+			patch.object(frappe.db, "rollback", side_effect=record_rollback),
+			patch.object(frappe.db, "release_savepoint", side_effect=record_release),
+			patch(
+				"roti_ropi_pos.mobile_pos.closing._complete_from_persisted",
+				side_effect=still_processing,
+			),
+		):
+			result = self._close(str(uuid4()), payload=payload)
+
+		self.assertFalse(result["ok"], result)
+		self.assertEqual(result["error"]["code"], "REQUEST_IN_PROGRESS")
+		self.assertTrue(result["error"]["retryable"])
+		self.assertEqual(frappe.response["http_status_code"], 409)
+		self.assertEqual([sp for sp in rolled_back_to if sp and sp.startswith("mobile_pos_")], [])
+		self.assertEqual([sp for sp in released if sp and sp.startswith("mobile_pos_")], [])
+
+	def test_submit_failure_after_the_entry_became_durable_reports_the_closing(self):
+		"""I-1: a post-commit failure must answer with the durable closing, not a 500.
+
+		ERPNext commits inside consolidation, so a submit can fail after the POS
+		Closing Entry is already submitted and durable. The cashier must receive
+		that state; raising instead would report failure for accepted money work.
+		"""
+		self._submit_sale()
+
+		def submit_then_fail(closing_name):
+			frappe.db.set_value(
+				"POS Closing Entry",
+				closing_name,
+				{"docstatus": 1, "status": "Submitted"},
+				update_modified=False,
+			)
+			frappe.db.commit()
+			raise RuntimeError("consolidation exploded after the entry became durable")
+
+		key = str(uuid4())
+		with patch(
+			"roti_ropi_pos.mobile_pos.closing._submit_persisted_closing",
+			side_effect=submit_then_fail,
+		):
+			result = self._close(key)
+
+		self.assertTrue(result["ok"], result)
+		self.assertEqual(result["data"]["closing"]["status"], "submitted")
+		request = frappe.get_doc("Mobile POS Request", {"idempotency_key": key})
+		self.assertEqual(request.status, "Completed")
+		self.assertEqual(request.reference_name, result["data"]["closing"]["name"])
+		self.assertEqual(frappe.db.count("POS Closing Entry", {"pos_opening_entry": self.opening}), 1)
+
+	def test_post_commit_failure_replays_the_same_closing_without_creating_a_second(self):
+		"""I-1: retrying after a post-commit failure must never create a duplicate closing."""
+		self._submit_sale()
+
+		def submit_then_fail(closing_name):
+			frappe.db.set_value(
+				"POS Closing Entry",
+				closing_name,
+				{"docstatus": 1, "status": "Submitted"},
+				update_modified=False,
+			)
+			frappe.db.commit()
+			raise RuntimeError("consolidation exploded after the entry became durable")
+
+		key = str(uuid4())
+		payload = self._closing_payload()
+		with patch(
+			"roti_ropi_pos.mobile_pos.closing._submit_persisted_closing",
+			side_effect=submit_then_fail,
+		):
+			first = self._close(key, payload=payload)
+		replay = self._close(key, payload=payload)
+
+		self.assertTrue(first["ok"], first)
+		self.assertTrue(replay["ok"], replay)
+		self.assertEqual(replay["data"]["closing"]["name"], first["data"]["closing"]["name"])
+		self.assertTrue(replay["meta"]["replayed"])
+		self.assertEqual(frappe.db.count("POS Closing Entry", {"pos_opening_entry": self.opening}), 1)
+
+	def test_unknown_submit_failure_without_a_durable_entry_stays_a_server_error(self):
+		"""Mutation gate: the durable-state recovery must not swallow unknown failures.
+
+		Nothing durable exists here, so the failure is not a business rejection and
+		must not be mapped into one. It stays an unknown exception, and no second
+		closing is created for the Opening.
+		"""
+		self._submit_sale()
+
+		def fail_before_anything_is_durable(_closing_name):
+			raise RuntimeError("submit exploded with nothing durable")
+
+		with (
+			patch(
+				"roti_ropi_pos.mobile_pos.closing._submit_persisted_closing",
+				side_effect=fail_before_anything_is_durable,
+			),
+			self.assertRaises(RuntimeError),
+		):
+			self._close(str(uuid4()))
+
+		self.assertEqual(
+			frappe.db.count("POS Closing Entry", {"pos_opening_entry": self.opening, "docstatus": 1}),
+			0,
+		)
+		self.assertEqual(frappe.db.count("POS Closing Entry", {"pos_opening_entry": self.opening}), 1)
+
+	def test_known_validation_failure_without_a_durable_entry_still_rejects(self):
+		"""Regression: a known validation class keeps the documented rejection envelope."""
+
+		def fail_with_validation(_closing_name):
+			raise frappe.ValidationError("Closing is not acceptable")
+
+		self._submit_sale()
+		key = str(uuid4())
+		with patch(
+			"roti_ropi_pos.mobile_pos.closing._submit_persisted_closing",
+			side_effect=fail_with_validation,
+		):
+			result = self._close(key)
+
+		self.assertFalse(result["ok"], result)
+		self.assertEqual(result["error"]["code"], "INVALID_REQUEST")
+		self.assertEqual(result["error"]["details"]["reason"], "ValidationError")
+		self.assertIsNone(frappe.db.get_value("POS Opening Entry", self.opening, "pos_closing_entry"))
+
+	def test_post_commit_consolidation_failure_keeps_the_committed_envelope(self):
+		"""I-1: consolidation failing after commit must not become a native HTTP 500.
+
+		The `>= 10` invoice path registers consolidation through
+		`frappe.db.after_commit`, so the callback runs after `COMMIT` already
+		succeeded. A failure there is reported through `v1.closing.status` as
+		`CLOSING_FAILED`, never by discarding the committed submission envelope.
+		"""
+		for _ in range(10):
+			self._submit_sale()
+
+		key = str(uuid4())
+		with patch(
+			"erpnext.accounts.doctype.pos_invoice_merge_log.pos_invoice_merge_log.consolidate_pos_invoices",
+			side_effect=RuntimeError("merge log exploded"),
+		):
+			result = self._close(key)
+
+		self.assertTrue(result["ok"], result)
+		self.assertEqual(result["data"]["closing"]["invoice_count"], 10)
+		request = frappe.get_doc("Mobile POS Request", {"idempotency_key": key})
+		self.assertEqual(request.status, "Completed")
+		self.assertEqual(frappe.db.count("POS Closing Entry", {"pos_opening_entry": self.opening}), 1)
+
 	# ── helpers ──────────────────────────────────────────────────────────
 
 	def _make_unresolved_closing(self, status: str):

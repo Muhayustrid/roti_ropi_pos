@@ -1,10 +1,11 @@
 from decimal import Decimal
+from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
 
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
-from roti_ropi_pos.mobile_pos.responses import api_endpoint, success
+from roti_ropi_pos.mobile_pos.responses import api_endpoint, commit_durable_phase, success
 from roti_ropi_pos.mobile_pos.validation import decimal_string, reject_fields, require_json_object
 
 
@@ -116,6 +117,76 @@ class TestAPIFoundation(IntegrationTestCase):
 		self.assertEqual(result["error"]["code"], "REQUEST_IN_PROGRESS")
 		self.assertEqual(result["error"]["retryable"], True)
 		self.assertEqual(frappe.response["http_status_code"], 409)
+
+	def test_api_endpoint_after_a_durable_commit_never_names_the_retired_savepoint(self):
+		"""I-1: a committed phase retires the savepoint, so it must not be named again.
+
+		MariaDB drops every savepoint at `COMMIT` and then answers both
+		`ROLLBACK TO SAVEPOINT` and `RELEASE SAVEPOINT` with error 1305,
+		`SAVEPOINT ... does not exist`. Swallowing that failure is what lets a
+		savepoint error mask a durable business state, so the endpoint must stop
+		naming the savepoint instead of relying on the failure being caught.
+		"""
+		save_points = []
+		released = []
+		original_rollback = frappe.db.rollback
+		original_release = frappe.db.release_savepoint
+
+		@api_endpoint
+		def commit_then_fail():
+			commit_durable_phase()
+			raise MobilePOSAPIError("REQUEST_IN_PROGRESS", "still processing", status=409, retryable=True)
+
+		def record_rollback(*args, **kwargs):
+			save_points.append(kwargs.get("save_point"))
+			return original_rollback(*args, **kwargs)
+
+		def record_release(save_point):
+			released.append(save_point)
+			return original_release(save_point)
+
+		with (
+			patch.object(frappe.db, "rollback", side_effect=record_rollback),
+			patch.object(frappe.db, "release_savepoint", side_effect=record_release),
+		):
+			result = commit_then_fail()
+
+		self.assertEqual(result["error"]["code"], "REQUEST_IN_PROGRESS")
+		self.assertEqual(frappe.response["http_status_code"], 409)
+		self.assertEqual(save_points, [None])
+		self.assertEqual(released, [])
+
+	def test_durable_commit_does_not_retire_the_next_endpoint_savepoint(self):
+		"""One endpoint's durable commit must not disarm the next endpoint's rollback.
+
+		The flag is per-request state. If it leaked, a later endpoint would fall
+		back to a full rollback and undo writes that were never part of its own
+		failed request.
+		"""
+
+		@api_endpoint
+		def commit_then_fail():
+			commit_durable_phase()
+			raise MobilePOSAPIError("REQUEST_IN_PROGRESS", "still processing", status=409)
+
+		@api_endpoint
+		def just_fail():
+			raise MobilePOSAPIError("INVALID_REQUEST", "bad", status=400)
+
+		commit_then_fail()
+		save_points = []
+		original_rollback = frappe.db.rollback
+
+		def record_rollback(*args, **kwargs):
+			save_points.append(kwargs.get("save_point"))
+			return original_rollback(*args, **kwargs)
+
+		with patch.object(frappe.db, "rollback", side_effect=record_rollback):
+			result = just_fail()
+
+		self.assertEqual(result["error"]["code"], "INVALID_REQUEST")
+		self.assertEqual(len(save_points), 1)
+		self.assertIsNotNone(save_points[0])
 
 	def test_api_endpoint_re_raises_unknown_exception(self):
 		@api_endpoint

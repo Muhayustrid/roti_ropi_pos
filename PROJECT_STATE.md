@@ -437,8 +437,8 @@ Scope is P0 only. P1/P2 findings, core Frappe/ERPNext files, `development.localh
 | P0-1 | C-1 route-alias auth bypass | **Complete — green, reviewed, committed** |
 | P0-2 | I-5 / I-6 idempotency contention and stable error behaviour | **Complete — green, mutation-verified, committed** |
 | P0-3 | I-2 Administrator elevation in closing | **Complete — green, mutation-verified, committed** |
-| P0-4 | I-1 closing transaction / savepoint boundary | In progress |
-| P0-5 | I-3 lost-key closing recovery | Not started |
+| P0-4 | I-1 closing transaction / savepoint boundary | **Complete — green, mutation-verified, committed** |
+| P0-5 | I-3 lost-key closing recovery | In progress |
 | P0-6 | I-4 ERPNext sale/return error mapping | Not started |
 | P0-7 | I-16 money-path evidence restoration | Not started |
 
@@ -498,8 +498,8 @@ Committed for this boundary in `fix: gate Mobile POS aliases by resolved dispatc
 `roti_ropi_pos/tests/helpers.py`, and this file. No migrate ran. `test_sales.py` and the
 extraction-design status line remain the pre-existing local edits described in §8.
 
-**Next action:** P0-3 was completed in a later session (see § P0-3 below). The next boundary is P0-4 —
-I-1, the closing transaction / savepoint boundary.
+**Next action:** P0-3 and P0-4 were completed in later sessions (see their sections below). The next
+boundary is P0-5 — I-3, server-authoritative lost-key closing recovery.
 
 ### P0-2 / I-5 + I-6 — complete
 
@@ -674,3 +674,75 @@ Committed for this boundary in `fix: run closing consolidation under cashier aut
 **Correction to the P0-2 section:** P0-2 was already committed *and* pushed before this session started
 (`e34e373`, `git rev-list --left-right --count origin/main...HEAD` = `0 0`). Any note implying it was
 uncommitted is wrong.
+
+### P0-4 / I-1 — complete
+
+Root cause, measured on `mobile-pos-regression.localhost` rather than inferred. `api_endpoint` opens one
+savepoint per request and rolls expected errors back to it, but closing deliberately commits its
+`Reserved`, `DraftCreated`, and `SubmitStarted` phases so a crashed request stays recoverable from the
+database alone. MariaDB drops every savepoint at `COMMIT`, so after the first phase commit both
+`ROLLBACK TO SAVEPOINT` and `RELEASE SAVEPOINT` answer `OperationalError(1305, 'SAVEPOINT ... does not
+exist')` — confirmed directly, and confirmed inside the endpoint before the fix, where a diagnostic
+recorded `('rollback-FAILED', 'mobile_pos_9eff6256e2', "OperationalError(1305, ...)")` followed by a
+failing release. The old code only swallowed those failures, so the savepoint error could still displace
+the durable closing state, and a failure raised after ERPNext's own internal commit had no stable
+recovery envelope at all.
+
+Fix (two production files):
+
+- `roti_ropi_pos/mobile_pos/responses.py`: new `commit_durable_phase()` marks the request
+  (`frappe.flags["mobile_pos_durable_commit"]`) and then commits. `_rollback_to` and the
+  `release_savepoint` in `api_endpoint`'s `finally` both skip the savepoint once the mark is set, so a
+  retired savepoint is never named again. The mark is initialised per request and restored on exit, so
+  one endpoint's durable commit cannot disarm the next endpoint's savepoint rollback. The deadlock
+  fallback is unchanged.
+- `roti_ropi_pos/mobile_pos/closing.py`: every phase commit goes through `commit_durable_phase()`. A
+  submit failure that is not one of `_KNOWN_SUBMIT_ERRORS` rolls back and then asks the database:
+  `_durable_closing()` returns True only for `docstatus = 1` with status `Queued`, `Submitted`, or
+  `Failed`, in which case the response is derived from the persisted closing; otherwise the exception
+  propagates untouched. `ensure_committed_closing_job` now contains its own failure: consolidation runs
+  after the response is committed, so a failure there sets the closing to `Failed` for
+  `v1.closing.status` instead of destroying the committed envelope.
+
+No duplicate closing is possible on any of these paths: the recovery always resolves the closing already
+referenced by the request row, and the count assertion is part of three of the new tests.
+
+Tests (`test_closing` 52 → 58, `test_api_foundation` 15 → 17):
+
+- `test_expected_error_after_a_durable_phase_never_touches_a_dead_savepoint` — no `mobile_pos_*`
+  savepoint is named for rollback or release once a phase is committed.
+- `test_api_endpoint_after_a_durable_commit_never_names_the_retired_savepoint` — the same contract at the
+  decorator level.
+- `test_durable_commit_does_not_retire_the_next_endpoint_savepoint` — the flag does not leak across
+  requests.
+- `test_submit_failure_after_the_entry_became_durable_reports_the_closing` and
+  `test_post_commit_failure_replays_the_same_closing_without_creating_a_second` — durable state is
+  reported and replayed, with exactly one closing for the Opening.
+- `test_post_commit_consolidation_failure_keeps_the_committed_envelope` — the queued path keeps its
+  committed success envelope.
+- `test_unknown_submit_failure_without_a_durable_entry_stays_a_server_error` (mutation gate) and
+  `test_known_validation_failure_without_a_durable_entry_still_rejects` — the recovery is not too broad.
+
+Evidence (all fresh, `mobile-pos-regression.localhost`):
+
+- RED before the fix: 1 failure + 3 errors across the six new closing tests
+  (`AssertionError: Lists differ: ['mobile_pos_db951363fa'] != []`, and `RuntimeError` escaping the three
+  post-commit tests).
+- GREEN: `test_closing` `Ran 58 tests in 208.465s OK`; `test_api_foundation` `Ran 17 tests in 0.041s OK`.
+- Mutations, each applied then reverted: forcing `_savepoint_survives()` to `True` fails both savepoint
+  gates (`['mobile_pos_3078ca9685', None] != [None]` and `['mobile_pos_f731da5762'] != []`); replacing
+  the `_durable_closing` guard with `if False` fails
+  `test_unknown_submit_failure_without_a_durable_entry_stays_a_server_error` with
+  `AssertionError: RuntimeError not raised`.
+- Neighbours, all OK: `test_idempotency` 32, `test_sessions` 10, `test_bootstrap` 9,
+  `test_authentication` 36, `test_sale_task9` 58, `test_return_task10` 21, `test_opening_amounts` 21.
+- Ruff 0.14.10 `check` all passed; `format` reformatted 3 files once; `git diff --check` clean.
+
+Committed for this boundary in `fix: keep closing responses correct across durable commits`:
+`roti_ropi_pos/mobile_pos/closing.py`, `roti_ropi_pos/mobile_pos/responses.py`,
+`roti_ropi_pos/tests/test_closing.py`, `roti_ropi_pos/tests/test_api_foundation.py`,
+`docs/mobile-pos/api-contract.md`, `docs/mobile-pos/backend-readiness-audit.md`, and this file. No
+migrate ran; no schema or DocType JSON changed. `test_sales.py` and the extraction-design status line
+remain the pre-existing local edits from §8, and the `test_sales` /
+`test_mobile_pos_flow` / `test_catalog` / `test_source_contracts` failures remain the baseline set proved
+by stash diff under P0-3.

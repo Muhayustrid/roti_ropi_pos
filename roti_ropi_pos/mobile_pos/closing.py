@@ -24,7 +24,7 @@ from roti_ropi_pos.mobile_pos.idempotency import (
 	replay_response,
 	require_idempotency_key,
 )
-from roti_ropi_pos.mobile_pos.responses import success
+from roti_ropi_pos.mobile_pos.responses import commit_durable_phase, success
 from roti_ropi_pos.mobile_pos.sessions import get_current_opening, opening_dto
 from roti_ropi_pos.mobile_pos.validation import (
 	closing_counted_amount_policy,
@@ -113,7 +113,7 @@ def execute_closing_submit(profile, payload: dict) -> dict:
 		request.phase = "Reserved"
 		request.lease_expires_at = _new_lease()
 		request.save(ignore_permissions=True)
-		frappe.db.commit()
+		commit_durable_phase()
 
 	if not request.reference_name:
 		try:
@@ -124,7 +124,7 @@ def execute_closing_submit(profile, payload: dict) -> dict:
 			frappe.db.rollback()
 			request = _get_existing_request(scope_key, for_update=True)
 			response = reject_request(request, error)
-			frappe.db.commit()
+			commit_durable_phase()
 			return response
 		request = _get_existing_request(scope_key, for_update=True)
 		request.reference_doctype = "POS Closing Entry"
@@ -139,7 +139,7 @@ def execute_closing_submit(profile, payload: dict) -> dict:
 		)
 		request.flags.ignore_links = True
 		request.save(ignore_permissions=True)
-		frappe.db.commit()
+		commit_durable_phase()
 	else:
 		closing = frappe.get_doc("POS Closing Entry", request.reference_name)
 
@@ -148,11 +148,20 @@ def execute_closing_submit(profile, payload: dict) -> dict:
 		request.phase = "SubmitStarted"
 		request.lease_expires_at = _new_lease()
 		request.save(ignore_permissions=True)
-		frappe.db.commit()
+		commit_durable_phase()
 		try:
 			_submit_persisted_closing(closing.name)
 		except _KNOWN_SUBMIT_ERRORS as error:
 			return _recover_submit_error(scope_key, error)
+		except Exception:
+			# Not a mapping: ERPNext commits inside consolidation, so submit can
+			# fail once the entry is already durable. Report that durable state
+			# instead of a failure for accepted work. With nothing durable the
+			# exception stays unknown and reaches Frappe's own 500 handling.
+			frappe.db.rollback()
+			if not _durable_closing(request.reference_name):
+				raise
+			return _complete_from_persisted(scope_key)
 
 	return _complete_from_persisted(scope_key)
 
@@ -166,7 +175,7 @@ def _claim_expired_request(scope_key: str, request_hash: str):
 		raise _request_in_progress(_OPERATION)
 	request.lease_expires_at = _new_lease()
 	request.save(ignore_permissions=True)
-	frappe.db.commit()
+	commit_durable_phase()
 	return request
 
 
@@ -213,6 +222,20 @@ def _create_closing_draft(profile, payload: dict, transaction_id: str):
 	return closing
 
 
+def _durable_closing(closing_name: str | None) -> bool:
+	"""True when the closing is already submitted and durable in the database.
+
+	Read after a rollback, so it reflects committed state only. ERPNext commits
+	inside consolidation, so a failed submit call can still leave a durable
+	closing behind; that state, not the exception, is what the cashier must be
+	told about.
+	"""
+	if not closing_name:
+		return False
+	state = frappe.db.get_value("POS Closing Entry", closing_name, ["docstatus", "status"], as_dict=True)
+	return bool(state and state.docstatus == 1 and state.status in {"Queued", "Submitted", "Failed"})
+
+
 def _submit_persisted_closing(closing_name: str) -> None:
 	"""Submit the persisted closing under the requesting cashier's own authority.
 
@@ -249,7 +272,7 @@ def _complete_from_persisted(scope_key: str) -> dict:
 		http_status=201,
 		audit_reference_written=True,
 	)
-	frappe.db.commit()
+	commit_durable_phase()
 	if closing.status == "Queued":
 		ensure_committed_closing_job(closing.name)
 	return response
@@ -279,7 +302,7 @@ def _recover_submit_error(scope_key: str, error: Exception) -> dict:
 			None,
 			update_modified=False,
 		)
-	frappe.db.commit()
+	commit_durable_phase()
 	return response
 
 
@@ -620,4 +643,25 @@ def ensure_committed_closing_job(closing_name: str) -> None:
 	closing = frappe.get_doc("POS Closing Entry", closing_name)
 	if closing.docstatus != 1 or closing.status != "Queued":
 		return
-	consolidate_pos_invoices(closing_entry=closing)
+	try:
+		consolidate_pos_invoices(closing_entry=closing)
+	except Exception:
+		# Post-commit work only. The closing entry and the request response are
+		# already durable, so a consolidation failure must not replace the
+		# committed envelope with an HTTP 500. Record it as a failed closing so
+		# `v1.closing.status` reports `CLOSING_FAILED` and a manager can review it.
+		_log.exception("Mobile POS closing %s failed during consolidation", closing_name)
+		_mark_closing_failed(closing_name)
+
+
+def _mark_closing_failed(closing_name: str) -> None:
+	"""Leave a failed consolidation visible instead of silently Queued.
+
+	The rollback discards the partial consolidation writes without touching the
+	already-committed closing and request rows. ERPNext does the same thing on
+	its own non-test path; doing it here keeps the state deterministic on every
+	path.
+	"""
+	frappe.db.rollback()
+	frappe.db.set_value("POS Closing Entry", closing_name, "status", "Failed", update_modified=False)
+	frappe.db.commit()

@@ -10,6 +10,33 @@ from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 
 _log = logging.getLogger(__name__)
 
+# Set once an endpoint has committed a phase it intends to keep. A commit ends the
+# transaction and InnoDB drops every savepoint with it, so the endpoint savepoint is
+# gone from that moment on and must never be named again.
+_DURABLE_COMMIT_FLAG = "mobile_pos_durable_commit"
+
+
+def commit_durable_phase() -> None:
+	"""Commit a phase the endpoint must keep, and retire the endpoint savepoint.
+
+	Closing deliberately commits its ``Reserved``, ``DraftCreated``, and
+	``SubmitStarted`` phases so a crashed request can be recovered from the
+	database alone. Each commit also destroys the savepoint ``api_endpoint``
+	established: MariaDB then answers both ``ROLLBACK TO SAVEPOINT`` and
+	``RELEASE SAVEPOINT`` with error 1305, ``SAVEPOINT ... does not exist``.
+	Marking the commit keeps the endpoint from naming a savepoint that is gone,
+	and keeps the committed phases from being undone by a later rollback that was
+	only ever meant to reach the savepoint. The mark is set before the commit
+	because the savepoint dies the moment ``COMMIT`` is issued, whichever
+	``after_commit`` callback fails afterwards.
+	"""
+	frappe.flags[_DURABLE_COMMIT_FLAG] = True
+	frappe.db.commit()
+
+
+def _savepoint_survives() -> bool:
+	return not frappe.flags.get(_DURABLE_COMMIT_FLAG)
+
 
 def success(
 	data: dict,
@@ -57,13 +84,19 @@ def error_envelope(error: MobilePOSAPIError, request_id: str, server_time: str) 
 
 
 def _rollback_to(savepoint: str) -> None:
-	"""Undo the endpoint's writes, falling back to a full rollback.
+	"""Undo the endpoint's writes without ever naming a retired savepoint.
 
-	A transaction-level abort (InnoDB does this on deadlock) discards every
-	savepoint, so ``ROLLBACK TO SAVEPOINT`` then fails with MariaDB 1305. Falling
-	back keeps the documented error envelope instead of replacing it with a native
-	HTTP 500; after a full abort there is nothing finer left to undo.
+	Two things retire the endpoint savepoint. A durable phase commit ends the
+	transaction, and a transaction-level abort (InnoDB does this on deadlock)
+	discards every savepoint. In both cases ``ROLLBACK TO SAVEPOINT`` fails with
+	MariaDB 1305 and would replace the documented error envelope with a native
+	HTTP 500. After a durable commit the fallback is also the only correct
+	behaviour: a full rollback cannot undo what was committed, so the durable
+	phases survive and only the uncommitted remainder is discarded.
 	"""
+	if not _savepoint_survives():
+		frappe.db.rollback()
+		return
 	try:
 		frappe.db.rollback(save_point=savepoint)
 	except Exception:
@@ -87,6 +120,8 @@ def api_endpoint(func: Callable[..., dict]) -> Callable[..., dict]:
 	@functools.wraps(func)
 	def wrapper(*args, **kwargs) -> dict:
 		savepoint = f"mobile_pos_{frappe.generate_hash(length=10)}"
+		previous_durable_commit = frappe.flags.get(_DURABLE_COMMIT_FLAG)
+		frappe.flags[_DURABLE_COMMIT_FLAG] = False
 		frappe.db.savepoint(savepoint)
 		try:
 			# Pass the handler return through unchanged. Read-only adapters and
@@ -109,9 +144,13 @@ def api_endpoint(func: Callable[..., dict]) -> Callable[..., dict]:
 			_log.exception("Mobile POS request %s raised an unknown exception", request_id)
 			raise
 		finally:
-			try:
-				frappe.db.release_savepoint(savepoint)
-			except Exception:  # release best-effort after rollback
-				pass
+			# A durable commit already retired the savepoint; naming it would raise
+			# MariaDB 1305 for nothing.
+			if _savepoint_survives():
+				try:
+					frappe.db.release_savepoint(savepoint)
+				except Exception:  # release best-effort after a transaction abort
+					pass
+			frappe.flags[_DURABLE_COMMIT_FLAG] = previous_durable_commit
 
 	return wrapper
