@@ -169,6 +169,7 @@ scheduler_events = {
 override_doctype_class = {
 	"POS Invoice": "roti_ropi_pos.overrides.pos_invoice.MobilePOSInvoice",
 	"POS Closing Entry": "roti_ropi_pos.overrides.pos_closing_entry.MobilePOSClosingEntry",
+	"User": "roti_ropi_pos.overrides.user.MobilePOSUser",
 }
 
 # Overriding Methods

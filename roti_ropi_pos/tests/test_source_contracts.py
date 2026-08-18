@@ -298,6 +298,21 @@ class TestAppHooks(IntegrationTestCase):
 			"audit roti_ropi_pos.hooks.override_doctype_class",
 		)
 
+	def test_user_override_registered(self):
+		overrides = frappe.get_hooks("override_doctype_class", app_name="roti_ropi_pos")
+		self.assertEqual(
+			overrides.get("User"),
+			["roti_ropi_pos.overrides.user.MobilePOSUser"],
+			"SOURCE CONTRACT: User override is not registered correctly — audit roti_ropi_pos.hooks",
+		)
+
+	def test_frappe_controller_dispatch_uses_mobile_user_override(self):
+		from frappe.model.base_document import get_controller
+
+		from roti_ropi_pos.overrides.user import MobilePOSUser
+
+		self.assertIs(get_controller("User"), MobilePOSUser)
+
 	def test_frappe_controller_dispatch_uses_mobile_closing_override(self):
 		from frappe.model.base_document import get_controller
 
