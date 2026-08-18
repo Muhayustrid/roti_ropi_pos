@@ -12,6 +12,7 @@ from frappe.utils import now_datetime, today
 from roti_ropi_pos.mobile_pos.authorization import get_authorized_profile, require_doc_permission
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.mobile_pos.idempotency import (
+	_UUID,
 	_create_processing_request,
 	_get_existing_request,
 	_raise_if_hash_conflict,
@@ -25,7 +26,11 @@ from roti_ropi_pos.mobile_pos.idempotency import (
 	require_idempotency_key,
 )
 from roti_ropi_pos.mobile_pos.responses import commit_durable_phase, success
-from roti_ropi_pos.mobile_pos.sessions import get_current_opening, opening_dto
+from roti_ropi_pos.mobile_pos.sessions import (
+	get_current_opening,
+	opening_dto,
+	unresolved_closing_request,
+)
 from roti_ropi_pos.mobile_pos.validation import (
 	closing_counted_amount_policy,
 	closing_counted_amount_string,
@@ -144,26 +149,146 @@ def execute_closing_submit(profile, payload: dict) -> dict:
 		closing = frappe.get_doc("POS Closing Entry", request.reference_name)
 
 	if closing.docstatus == 0:
-		request = _get_existing_request(scope_key, for_update=True)
-		request.phase = "SubmitStarted"
-		request.lease_expires_at = _new_lease()
-		request.save(ignore_permissions=True)
-		commit_durable_phase()
-		try:
-			_submit_persisted_closing(closing.name)
-		except _KNOWN_SUBMIT_ERRORS as error:
-			return _recover_submit_error(scope_key, error)
-		except Exception:
-			# Not a mapping: ERPNext commits inside consolidation, so submit can
-			# fail once the entry is already durable. Report that durable state
-			# instead of a failure for accepted work. With nothing durable the
-			# exception stays unknown and reaches Frappe's own 500 handling.
-			frappe.db.rollback()
-			if not _durable_closing(request.reference_name):
-				raise
-			return _complete_from_persisted(scope_key)
+		return _resume_draft_closing(scope_key, closing.name)
 
 	return _complete_from_persisted(scope_key)
+
+
+def _resume_draft_closing(scope_key: str, closing_name: str) -> dict:
+	"""Submit a persisted draft closing and answer from its durable state.
+
+	Shared by the keyed submit path and by lost-key recovery, so both resolve a
+	post-commit failure identically.
+	"""
+	request = _get_existing_request(scope_key, for_update=True)
+	request.phase = "SubmitStarted"
+	request.lease_expires_at = _new_lease()
+	request.save(ignore_permissions=True)
+	commit_durable_phase()
+	try:
+		_submit_persisted_closing(closing_name)
+	except _KNOWN_SUBMIT_ERRORS as error:
+		return _recover_submit_error(scope_key, error)
+	except Exception:
+		# Not a mapping: ERPNext commits inside consolidation, so submit can
+		# fail once the entry is already durable. Report that durable state
+		# instead of a failure for accepted work. With nothing durable the
+		# exception stays unknown and reaches Frappe's own 500 handling.
+		frappe.db.rollback()
+		if not _durable_closing(closing_name):
+			raise
+	return _complete_from_persisted(scope_key)
+
+
+def execute_closing_recovery(profile) -> dict:
+	"""Resolve an unresolved Closing from server state when the client key is gone.
+
+	The cashier has lost the idempotency key (reinstall, wiped storage, discarded
+	pending mutation), so nothing the client sends can identify the stranded
+	Closing. Identity therefore comes only from the authenticated session, the
+	authorized POS Profile, and the persisted Opening and Closing rows. Adoption
+	requires every one of those to agree; anything ambiguous is escalated to a
+	manager instead of guessed at. Recovery never creates a Closing Entry — it
+	only resumes or reports the one that already exists.
+	"""
+	opening = get_current_opening(profile, for_update=True)
+	if not opening:
+		raise MobilePOSAPIError(
+			"NO_OPEN_SESSION",
+			"No open POS session is available for this profile.",
+			status=422,
+			details={"pos_profile": profile.name},
+		)
+	closing_name = opening.pos_closing_entry
+	if not closing_name:
+		request = unresolved_closing_request(opening)
+		closing_name = request.reference_name if request else None
+	if not closing_name:
+		raise MobilePOSAPIError(
+			"CLOSING_RECOVERY_NOT_AVAILABLE",
+			"No unresolved Closing exists for this session.",
+			status=409,
+			details={"pos_profile": profile.name, "opening_entry": opening.name},
+		)
+	_lock_opening(opening.name)
+	closing = frappe.get_doc("POS Closing Entry", closing_name, for_update=True)
+	require_doc_permission("POS Closing Entry", "read", doc=closing)
+	_require_adoptable_closing(profile, opening, closing)
+	scope_key = _scope_key(closing.custom_mobile_pos_transaction_id, _OPERATION)
+	request = _get_existing_request(scope_key)
+	if request:
+		if request.status in {"Completed", "Rejected"}:
+			return replay_response(request)
+		# `_claim_expired_request` re-reads the row under a lock and refuses a live
+		# lease itself, so the lease rule stays defined in exactly one place.
+		_claim_expired_request(scope_key, request.request_hash)
+	else:
+		_adopt_closing_request(scope_key, closing)
+	if closing.docstatus == 0:
+		return _resume_draft_closing(scope_key, closing.name)
+	return _complete_from_persisted(scope_key)
+
+
+def _require_adoptable_closing(profile, opening, closing) -> None:
+	"""Escalate unless cashier, profile, company, opening, and state all agree.
+
+	Each mismatch means the server cannot prove this cashier owns the work, so
+	the outlet is handed to a manager rather than to a guess. The reason is
+	deliberately coarse and never discloses the other cashier, profile, or
+	document that caused it.
+	"""
+	reason = None
+	if closing.user != frappe.session.user:
+		reason = "cashier_mismatch"
+	elif closing.pos_profile != profile.name or closing.company != profile.company:
+		reason = "profile_mismatch"
+	elif closing.pos_opening_entry != opening.name:
+		reason = "opening_mismatch"
+	elif closing.docstatus == 2 or (closing.docstatus == 0 and closing.status not in {None, "Draft"}):
+		reason = "closing_state_unrecoverable"
+	elif not closing.custom_mobile_pos_transaction_id or not _UUID.match(
+		closing.custom_mobile_pos_transaction_id
+	):
+		# Without the transaction id the Closing cannot be bound to a request
+		# identity, so replay and duplicate protection could not be honoured.
+		reason = "closing_not_mobile_owned"
+	if not reason:
+		return
+	raise MobilePOSAPIError(
+		"CLOSING_RECOVERY_REQUIRES_MANAGER",
+		"This Closing cannot be recovered automatically. A manager must review it in ERPNext.",
+		status=409,
+		details={
+			"pos_profile": profile.name,
+			"opening_entry": opening.name,
+			"reason": reason,
+		},
+	)
+
+
+def _adopt_closing_request(scope_key: str, closing) -> None:
+	"""Recreate the control row for a Closing whose request record is gone.
+
+	The Closing already carries the original idempotency key, so the rebuilt row
+	keeps the same request identity: a later recovery replays this outcome
+	instead of repeating the work, and no second Closing can be created for the
+	Opening. The request hash is derived from the recovered Closing because the
+	original request body is exactly what was lost.
+	"""
+	key = closing.custom_mobile_pos_transaction_id
+	request = _create_processing_request(
+		scope_key,
+		key,
+		_OPERATION,
+		canonical_hash(_OPERATION, {"recovered_closing": closing.name}),
+	)
+	request.reference_doctype = "POS Closing Entry"
+	request.reference_name = closing.name
+	request.phase = "DraftCreated"
+	request.lease_expires_at = _new_lease()
+	request.flags.ignore_links = True
+	request.save(ignore_permissions=True)
+	commit_durable_phase()
 
 
 def _claim_expired_request(scope_key: str, request_hash: str):

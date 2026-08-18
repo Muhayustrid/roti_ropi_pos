@@ -26,6 +26,7 @@ MOBILE_POS_METHODS = {
 	"roti_ropi_pos.api.v1.sales.create_return",
 	"roti_ropi_pos.api.v1.closing.preview",
 	"roti_ropi_pos.api.v1.closing.submit",
+	"roti_ropi_pos.api.v1.closing.recover",
 	"roti_ropi_pos.api.v1.closing.status",
 }
 

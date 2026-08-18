@@ -4,7 +4,12 @@ import frappe
 
 from roti_ropi_pos.api.v1.bootstrap import mobile_pos_endpoint
 from roti_ropi_pos.mobile_pos.authorization import get_authorized_profile, require_doc_permission
-from roti_ropi_pos.mobile_pos.closing import closing_status, execute_closing_submit, preview_closing
+from roti_ropi_pos.mobile_pos.closing import (
+	closing_status,
+	execute_closing_recovery,
+	execute_closing_submit,
+	preview_closing,
+)
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.mobile_pos.responses import success
 from roti_ropi_pos.mobile_pos.validation import require_json_object
@@ -33,6 +38,22 @@ def submit(**kwargs) -> dict:
 	require_doc_permission("POS Closing Entry", "create")
 	require_doc_permission("POS Closing Entry", "submit")
 	return execute_closing_submit(profile, payload)
+
+
+@frappe.whitelist(methods=["POST"])
+@mobile_pos_endpoint
+def recover(pos_profile=None) -> dict:
+	"""Resolve an unresolved Closing from server state when the client key is lost."""
+	if not isinstance(pos_profile, str) or not pos_profile or pos_profile != pos_profile.strip():
+		raise MobilePOSAPIError(
+			"INVALID_REQUEST",
+			"pos_profile is invalid.",
+			details={"field": "pos_profile", "reason": "Expected a POS Profile name."},
+		)
+	_unknown(dict(frappe.form_dict), {"cmd", "pos_profile"})
+	profile = get_authorized_profile(pos_profile.strip())
+	require_doc_permission("POS Closing Entry", "submit")
+	return execute_closing_recovery(profile)
 
 
 @frappe.whitelist(methods=["GET"])

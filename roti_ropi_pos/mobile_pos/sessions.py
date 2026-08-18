@@ -190,24 +190,45 @@ def opening_dto(doc) -> dict:
 	}
 
 
+def unresolved_closing_request(opening=None) -> dict | None:
+	"""Return the cashier's blocking Closing control row, newest first.
+
+	One definition of "a Closing request still strands this cashier", shared by
+	the blocking projection and by lost-key recovery, so the two can never
+	disagree about which row holds the outlet.
+
+	A reservation that never reached a Closing Entry and whose lease has expired
+	is skipped: nothing durable exists behind it, so it must not disable sales,
+	returns, and closing for ever. A live lease still blocks, because a request
+	really is running.
+	"""
+	filters = {
+		"user": frappe.session.user,
+		"endpoint": "v1.closing.submit",
+		"status": "Processing",
+	}
+	if opening:
+		filters["creation"] = [">=", opening.creation or opening.period_start_date]
+	now = now_datetime()
+	for request in frappe.get_all(
+		"Mobile POS Request",
+		filters=filters,
+		fields=["name", "idempotency_key", "reference_name", "phase", "lease_expires_at"],
+		order_by="creation desc",
+	):
+		if request.reference_name:
+			return request
+		if request.lease_expires_at and get_datetime(request.lease_expires_at) <= now:
+			continue
+		return request
+	return None
+
+
 def closing_projection(opening=None) -> dict | None:
 	"""Project an unresolved Closing that blocks cashier mutations."""
 	closing_name = getattr(opening, "pos_closing_entry", None) if opening else None
 	if not closing_name:
-		filters = {
-			"user": frappe.session.user,
-			"endpoint": "v1.closing.submit",
-			"status": "Processing",
-		}
-		if opening:
-			filters["creation"] = [">=", opening.creation or opening.period_start_date]
-		request = frappe.db.get_value(
-			"Mobile POS Request",
-			filters,
-			["reference_name", "phase"],
-			as_dict=True,
-			order_by="creation desc",
-		)
+		request = unresolved_closing_request(opening)
 		if not request:
 			return None
 		closing_name = request.reference_name

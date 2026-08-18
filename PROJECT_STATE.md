@@ -1,9 +1,9 @@
 # PROJECT_STATE.md — AI session resume checkpoint
 
-**Last updated:** 2026-08-18, after P0-1 (audit finding C-1) went green and was committed.
-**Resume point:** New workstream — Mobile POS backend readiness remediation, P0 only, from
-`docs/mobile-pos/backend-readiness-audit.md`. P0-1 / C-1 is complete, reviewed, and committed. P0-2
-(idempotency contention, I-5 / I-6) is the next boundary. See §11.
+**Last updated:** 2026-08-19, after P0-5 (audit finding I-3) went green and was committed.
+**Resume point:** Mobile POS backend readiness remediation, P0 only, from
+`docs/mobile-pos/backend-readiness-audit.md`. P0-1 through P0-5 are complete, mutation-verified, and
+committed. P0-6 (ERPNext sale/return error mapping, I-4) is the next boundary. See §11.
 
 The app-ownership extraction project (Phases 0-3) is complete; its record below stays as history.
 
@@ -438,7 +438,7 @@ Scope is P0 only. P1/P2 findings, core Frappe/ERPNext files, `development.localh
 | P0-2 | I-5 / I-6 idempotency contention and stable error behaviour | **Complete — green, mutation-verified, committed** |
 | P0-3 | I-2 Administrator elevation in closing | **Complete — green, mutation-verified, committed** |
 | P0-4 | I-1 closing transaction / savepoint boundary | **Complete — green, mutation-verified, committed** |
-| P0-5 | I-3 lost-key closing recovery | In progress |
+| P0-5 | I-3 lost-key closing recovery | **Complete — green, mutation-verified, committed** |
 | P0-6 | I-4 ERPNext sale/return error mapping | Not started |
 | P0-7 | I-16 money-path evidence restoration | Not started |
 
@@ -498,8 +498,9 @@ Committed for this boundary in `fix: gate Mobile POS aliases by resolved dispatc
 `roti_ropi_pos/tests/helpers.py`, and this file. No migrate ran. `test_sales.py` and the
 extraction-design status line remain the pre-existing local edits described in §8.
 
-**Next action:** P0-3 and P0-4 were completed in later sessions (see their sections below). The next
-boundary is P0-5 — I-3, server-authoritative lost-key closing recovery.
+**Next action:** P0-3, P0-4, and P0-5 were completed in later sessions (see their sections below). The
+next boundary is P0-6 — I-4, mapping expected ERPNext sale and return validation failures into the stable
+v1 error envelope.
 
 ### P0-2 / I-5 + I-6 — complete
 
@@ -746,3 +747,89 @@ migrate ran; no schema or DocType JSON changed. `test_sales.py` and the extracti
 remain the pre-existing local edits from §8, and the `test_sales` /
 `test_mobile_pos_flow` / `test_catalog` / `test_source_contracts` failures remain the baseline set proved
 by stash diff under P0-3.
+
+### P0-5 / I-3 — complete
+
+Root cause, reproduced live on `mobile-pos-regression.localhost` before any fix rather than inferred. A
+`Mobile POS Request` row left `Processing` / `Reserved` with a long-dead lease projected
+`{"status": "processing", "phase": "Reserved"}`, `has_unresolved_closing` returned `True`, and all five
+bootstrap capabilities were false — while the route allowlist exposed only `closing.preview`,
+`closing.submit`, and `closing.status`. There was no recovery operation at all, so a cashier who lost the
+idempotency key (reinstall, wiped storage, discarded pending mutation) could not resolve the shift from
+the app under any input. Two distinct defects sat behind that: no server-authoritative recovery, and a
+reservation with nothing durable behind it blocking sales, returns, and closing for ever.
+
+Fix (three production files plus the route allowlist):
+
+- `roti_ropi_pos/mobile_pos/closing.py`: `execute_closing_recovery(profile)` resolves the unresolved
+  Closing from server state only — the authenticated session, the authorized POS Profile, and the
+  persisted Opening and Closing rows. It locks the Opening, re-reads the Closing `for_update`, and calls
+  `_require_adoptable_closing`, which escalates unless cashier, POS Profile, company, Opening reference,
+  docstatus/status, and the stored `custom_mobile_pos_transaction_id` all agree. Escalation is HTTP 409
+  `CLOSING_RECOVERY_REQUIRES_MANAGER` with a coarse `reason` that never names the other cashier, profile,
+  or document. Recovery **never creates a Closing Entry**: it reuses the `v1.closing.submit` operation
+  identity keyed by the Closing's own transaction id, so `_adopt_closing_request` rebuilds the lost
+  control row against the same identity, a second call replays, and no second Closing is possible. The
+  post-commit submit branch of `execute_closing_submit` was extracted to `_resume_draft_closing`, so the
+  keyed path and the recovery path resolve a post-commit failure identically. The live-lease rule is
+  defined once, in `_claim_expired_request`.
+- `roti_ropi_pos/mobile_pos/sessions.py`: `unresolved_closing_request()` is the single definition of "a
+  Closing request still strands this cashier", shared by `closing_projection` and recovery. A reservation
+  with no `reference_name` and an expired lease is skipped; a live lease still blocks.
+- `roti_ropi_pos/api/v1/closing.py`: `POST recover(pos_profile)` — deliberately no `X-Idempotency-Key`,
+  since the lost key is the defect; unknown fields are rejected and `POS Closing Entry` submit permission
+  is required. `roti_ropi_pos/mobile_pos/auth_hook.py` adds the route (16 → 17 allowlist entries).
+
+Tests (`test_closing` 58 → 67, `test_authentication` allowlist set updated):
+
+- `test_recover_resumes_the_abandoned_draft_closing_without_creating_a_second` — the stranded Draft is
+  adopted and submitted; exactly one Closing for the Opening; the control row ends `Completed` on
+  `v1.closing.submit`.
+- `test_recover_reports_a_durable_queued_closing_without_resubmitting_it` — a durable Queued Closing is
+  reported, `_submit_persisted_closing` is never called.
+- `test_recover_replays_its_recorded_outcome_instead_of_redoing_the_work` — second call is `replayed`,
+  still one Closing.
+- `test_recover_reports_nothing_to_recover_when_no_closing_is_unresolved` —
+  `CLOSING_RECOVERY_NOT_AVAILABLE`, zero Closings created.
+- `test_recover_defers_to_a_request_that_still_holds_a_live_lease` — retryable `REQUEST_IN_PROGRESS`.
+- `test_recover_adopts_an_expired_request_row_instead_of_creating_another` — one request row for
+  `v1.closing.submit`, ending `Completed` against the same Closing.
+- `test_recover_escalates_a_closing_that_belongs_to_another_cashier` and
+  `test_recover_escalates_a_closing_bound_to_a_different_opening` (mutation gates) — coarse reasons, no
+  disclosure, Closing left at `docstatus 0`.
+- `test_dead_reservation_with_an_expired_lease_stops_blocking_the_outlet` — a live lease blocks
+  (`closing_in_progress`); once the lease dies the session is `active` and both capabilities return.
+
+Evidence (all fresh, `mobile-pos-regression.localhost`):
+
+- RED before the fix: `Ran 67 tests`, `FAILED (failures=1, errors=8)` — eight
+  `AttributeError: module 'roti_ropi_pos.api.v1.closing' has no attribute 'recover'` plus the projection
+  failure `{'status': 'processing', 'phase': 'Reserved', ...} is not None`.
+- A first GREEN attempt failed with six `INVALID_REQUEST` / `client_accepted_grand_total is invalid`
+  responses. That was a test-harness defect, not production: the recovery tests inherited the previous
+  call's `form_dict`, so the endpoint's unknown-field rejection fired on the leftover sale body. Fixed in
+  test code only with a `_recover()` helper that sets the request body an HTTP client actually sends.
+- GREEN: `test_closing` `Ran 67 tests in 289.190s OK`.
+- Mutations, each applied then reverted: removing the cashier check and removing the Opening check each
+  submit work that is not provably this cashier's
+  (`AssertionError: Expected '_submit_persisted_closing' to not have been called. Called 1 times.`);
+  removing the expired-lease skip re-strands the outlet
+  (`{'status': 'processing', 'phase': 'Reserved', ...} is not None`); removing the lease guard inside
+  `_claim_expired_request` lets recovery race a live request (same `Called 1 times` failure). A fifth
+  probe removed the duplicated lease check in `execute_closing_recovery` and the test still passed —
+  that duplicate was genuinely redundant, so it was deleted and replaced with a comment pointing at the
+  single owner of the rule.
+- Ruff 0.14.10 `check` all passed; `format --check` reported all six touched files already formatted;
+  `git diff --check` clean.
+- Neighbours, all OK after the mutations were reverted: `test_closing` 67 (re-run,
+  `Ran 67 tests in 305.518s OK`), `test_authentication` 36, `test_sessions` 10, `test_bootstrap` 9,
+  `test_idempotency` 32, `test_api_foundation` 17, `test_opening_amounts` 21, `test_sale_task9` 58,
+  `test_return_task10` 21.
+
+Committed for this boundary in `feat: recover an unresolved closing without the client key`:
+`roti_ropi_pos/mobile_pos/closing.py`, `roti_ropi_pos/mobile_pos/sessions.py`,
+`roti_ropi_pos/api/v1/closing.py`, `roti_ropi_pos/mobile_pos/auth_hook.py`,
+`roti_ropi_pos/tests/test_closing.py`, `roti_ropi_pos/tests/test_authentication.py`,
+`docs/mobile-pos/api-contract.md`, `docs/mobile-pos/backend-readiness-audit.md`, and this file. No
+migrate ran; no schema or DocType JSON changed. `test_sales.py` and the extraction-design status line
+remain the pre-existing local edits from §8.

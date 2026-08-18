@@ -1150,7 +1150,227 @@ class TestClosingPreview(IntegrationTestCase):
 		self.assertEqual(request.status, "Completed")
 		self.assertEqual(frappe.db.count("POS Closing Entry", {"pos_opening_entry": self.opening}), 1)
 
+	# ── lost-key recovery (I-3) ──────────────────────────────────────────
+
+	def test_recover_resumes_the_abandoned_draft_closing_without_creating_a_second(self):
+		"""I-3: the server adopts the stranded Draft from its own state and submits it.
+
+		The cashier no longer holds the idempotency key, so identity comes from the
+		session, the POS Profile, and the persisted Opening/Closing rows. The adopted
+		control row reuses the key stored on the Closing, so the Opening ends with
+		exactly one Closing Entry.
+		"""
+		self._submit_sale()
+		closing = self._make_unresolved_closing("Draft")
+
+		result = self._recover()
+
+		self.assertTrue(result["ok"], result)
+		self.assertEqual(result["data"]["closing"]["name"], closing.name)
+		self.assertEqual(result["data"]["closing"]["status"], "submitted")
+		self.assertEqual(frappe.db.count("POS Closing Entry", {"pos_opening_entry": self.opening}), 1)
+		request = frappe.get_doc(
+			"Mobile POS Request",
+			{"idempotency_key": closing.custom_mobile_pos_transaction_id},
+		)
+		self.assertEqual(request.status, "Completed")
+		self.assertEqual(request.endpoint, "v1.closing.submit")
+		self.assertEqual(request.reference_name, closing.name)
+
+	def test_recover_reports_a_durable_queued_closing_without_resubmitting_it(self):
+		"""I-3: a Closing that is already durable is reported, never submitted again."""
+		self._submit_sale()
+		closing = self._durable_queued_closing()
+
+		with (
+			patch("roti_ropi_pos.mobile_pos.closing._submit_persisted_closing") as submit,
+			patch("roti_ropi_pos.mobile_pos.closing.ensure_committed_closing_job") as job,
+		):
+			result = self._recover()
+
+		submit.assert_not_called()
+		self.assertTrue(result["ok"], result)
+		self.assertEqual(result["data"]["closing"]["status"], "queued")
+		self.assertEqual(result["data"]["closing"]["name"], closing.name)
+		job.assert_called_once_with(closing.name)
+
+	def test_recover_replays_its_recorded_outcome_instead_of_redoing_the_work(self):
+		"""I-3: recovery is idempotent without a client key and never duplicates."""
+		self._submit_sale()
+		closing = self._durable_queued_closing()
+
+		with patch("roti_ropi_pos.mobile_pos.closing.ensure_committed_closing_job"):
+			first = self._recover()
+			second = self._recover()
+
+		self.assertEqual(first["data"]["closing"]["name"], closing.name)
+		self.assertEqual(second["data"]["closing"]["name"], closing.name)
+		self.assertFalse(first["meta"]["replayed"])
+		self.assertTrue(second["meta"]["replayed"])
+		self.assertEqual(frappe.db.count("POS Closing Entry", {"pos_opening_entry": self.opening}), 1)
+
+	def test_recover_reports_nothing_to_recover_when_no_closing_is_unresolved(self):
+		"""I-3: an outlet that is not stranded gets a deterministic refusal."""
+		self._submit_sale()
+
+		result = self._recover()
+
+		self.assertFalse(result["ok"], result)
+		self.assertEqual(result["error"]["code"], "CLOSING_RECOVERY_NOT_AVAILABLE")
+		self.assertEqual(result["error"]["details"]["pos_profile"], self.profile.name)
+		self.assertEqual(frappe.db.count("POS Closing Entry", {"pos_opening_entry": self.opening}), 0)
+
+	def test_recover_defers_to_a_request_that_still_holds_a_live_lease(self):
+		"""I-3: recovery must not race a Closing request that is still running."""
+		self._submit_sale()
+		closing = self._make_unresolved_closing("Draft")
+		self._processing_request(closing, lease=timedelta(minutes=1))
+
+		with patch("roti_ropi_pos.mobile_pos.closing._submit_persisted_closing") as submit:
+			result = self._recover()
+
+		submit.assert_not_called()
+		self.assertEqual(result["error"]["code"], "REQUEST_IN_PROGRESS")
+		self.assertTrue(result["error"]["retryable"])
+
+	def test_recover_adopts_an_expired_request_row_instead_of_creating_another(self):
+		"""I-3: an abandoned row is claimed, so one key stays bound to one Closing."""
+		self._submit_sale()
+		closing = self._make_unresolved_closing("Draft")
+		row = self._processing_request(closing, lease=timedelta(seconds=-1))
+
+		result = self._recover()
+
+		self.assertTrue(result["ok"], result)
+		self.assertEqual(result["data"]["closing"]["name"], closing.name)
+		self.assertEqual(frappe.db.count("Mobile POS Request", {"endpoint": "v1.closing.submit"}), 1)
+		request = frappe.get_doc("Mobile POS Request", row.name)
+		self.assertEqual(request.status, "Completed")
+		self.assertEqual(request.reference_name, closing.name)
+
+	def test_recover_escalates_a_closing_that_belongs_to_another_cashier(self):
+		"""I-3 mutation gate: adoption requires the Closing's own cashier identity."""
+		self._submit_sale()
+		closing = self._make_unresolved_closing("Draft")
+		frappe.set_user("Administrator")
+		other = make_cashier(f"closing-other-{frappe.generate_hash(length=8)}@rotiropi.test")
+		frappe.db.set_value("POS Closing Entry", closing.name, "user", other, update_modified=False)
+		frappe.set_user(self.cashier)
+
+		with patch("roti_ropi_pos.mobile_pos.closing._submit_persisted_closing") as submit:
+			result = self._recover()
+
+		submit.assert_not_called()
+		self.assertFalse(result["ok"], result)
+		self.assertEqual(result["error"]["code"], "CLOSING_RECOVERY_REQUIRES_MANAGER")
+		self.assertEqual(result["error"]["details"]["reason"], "cashier_mismatch")
+		self.assertNotIn(other, frappe.as_json(result["error"]["details"]))
+		self.assertEqual(
+			frappe.db.get_value("POS Closing Entry", closing.name, "docstatus"),
+			0,
+		)
+
+	def test_recover_escalates_a_closing_bound_to_a_different_opening(self):
+		"""I-3 mutation gate: adoption requires the Closing to belong to this Opening."""
+		self._submit_sale()
+		closing = self._make_unresolved_closing("Draft")
+		other_opening = make_opening_entry(
+			user=self.cashier,
+			company=COMPANY,
+			pos_profile=self.profile.name,
+			period_start_date=frappe.utils.now_datetime(),
+			posting_date=frappe.utils.today(),
+			balances=[{"mode_of_payment": "Cash", "opening_amount": "0"}],
+			status="Closed",
+		)
+		frappe.db.set_value(
+			"POS Closing Entry", closing.name, "pos_opening_entry", other_opening, update_modified=False
+		)
+
+		with patch("roti_ropi_pos.mobile_pos.closing._submit_persisted_closing") as submit:
+			result = self._recover()
+
+		submit.assert_not_called()
+		self.assertEqual(result["error"]["code"], "CLOSING_RECOVERY_REQUIRES_MANAGER")
+		self.assertEqual(result["error"]["details"]["reason"], "opening_mismatch")
+
+	def test_dead_reservation_with_an_expired_lease_stops_blocking_the_outlet(self):
+		"""I-3: a reservation with no Closing and a dead lease strands nothing.
+
+		Nothing durable exists behind it, so it must not keep sales, returns, and
+		closing disabled for ever. A reservation whose lease is still live does
+		block, because a request really is running.
+		"""
+		from roti_ropi_pos.mobile_pos.idempotency import _create_processing_request, _scope_key
+
+		key = str(uuid4())
+		row = _create_processing_request(
+			_scope_key(key, "v1.closing.submit"), key, "v1.closing.submit", frappe.generate_hash(length=64)
+		)
+		row.phase = "Reserved"
+		row.lease_expires_at = frappe.utils.now_datetime() + timedelta(minutes=1)
+		row.save(ignore_permissions=True)
+
+		blocked = sessions_api.current(pos_profile=self.profile.name)["data"]
+		self.assertEqual(blocked["closing"]["status"], "processing")
+		self.assertEqual(blocked["opening_session"]["lifecycle_state"], "closing_in_progress")
+
+		frappe.db.set_value(
+			"Mobile POS Request",
+			row.name,
+			"lease_expires_at",
+			frappe.utils.now_datetime() - timedelta(seconds=1),
+			update_modified=False,
+		)
+
+		cleared = sessions_api.current(pos_profile=self.profile.name)["data"]
+		self.assertIsNone(cleared["closing"])
+		self.assertEqual(cleared["opening_session"]["lifecycle_state"], "active")
+		bootstrap = bootstrap_api.get(pos_profile=self.profile.name)["data"]
+		self.assertTrue(bootstrap["capabilities"]["submit_sale"])
+		self.assertTrue(bootstrap["capabilities"]["close_session"])
+
 	# ── helpers ──────────────────────────────────────────────────────────
+
+	def _recover(self):
+		"""Call recovery with the request body an HTTP client actually sends.
+
+		Only `pos_profile` reaches `form_dict`, so the endpoint's unknown-field
+		rejection sees the same payload in tests as in production instead of the
+		leftover body of whichever call ran before it.
+		"""
+		profile = self.profile.name
+		frappe.local.form_dict = frappe._dict({"pos_profile": profile})
+		return closing_api.recover(pos_profile=profile)
+
+	def _durable_queued_closing(self):
+		"""A Closing that is submitted and Queued, as a crashed deferred run leaves it."""
+		closing = self._make_unresolved_closing("Queued")
+		frappe.db.set_value("POS Closing Entry", closing.name, "docstatus", 1, update_modified=False)
+		closing.reload()
+		return closing
+
+	def _processing_request(self, closing, *, lease):
+		"""A Processing control row bound to `closing`, with the given lease offset."""
+		from roti_ropi_pos.mobile_pos.idempotency import (
+			_create_processing_request,
+			_scope_key,
+		)
+
+		key = closing.custom_mobile_pos_transaction_id
+		row = _create_processing_request(
+			_scope_key(key, "v1.closing.submit"),
+			key,
+			"v1.closing.submit",
+			frappe.generate_hash(length=64),
+		)
+		row.reference_doctype = "POS Closing Entry"
+		row.reference_name = closing.name
+		row.phase = "SubmitStarted"
+		row.lease_expires_at = frappe.utils.now_datetime() + lease
+		row.flags.ignore_links = True
+		row.save(ignore_permissions=True)
+		return row
 
 	def _make_unresolved_closing(self, status: str):
 		from roti_ropi_pos.mobile_pos.closing import _create_closing_draft

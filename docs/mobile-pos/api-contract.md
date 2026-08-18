@@ -99,6 +99,8 @@
 | 409 | `SESSION_ALREADY_CLOSED` | Opening is no longer open | No |
 | 409 | `DOCUMENT_STATE_CONFLICT` | Operation conflicts with current ERPNext state | Usually no |
 | 409 | `REQUEST_IN_PROGRESS` | A request with this idempotency key is still being processed | Yes |
+| 409 | `CLOSING_RECOVERY_NOT_AVAILABLE` | No unresolved Closing exists for this session | No |
+| 409 | `CLOSING_RECOVERY_REQUIRES_MANAGER` | The unresolved Closing cannot be adopted safely; a manager must review it | No |
 | 422 | `NO_OPEN_SESSION` | Sale requires an active opening | No |
 | 422 | `UNSUPPORTED_POS_MODE` | Site is not configured for POS Invoice mode | No |
 | 422 | `PRICE_CHANGED` | Authoritative price differs from accepted client quote | No |
@@ -123,6 +125,8 @@
 | `SESSION_ALREADY_CLOSED` | `opening_entry: string` |
 | `DOCUMENT_STATE_CONFLICT` | `doctype: string`, `name: string`, `state: string` |
 | `REQUEST_IN_PROGRESS` | `endpoint: string`, `retry_after_seconds: integer` |
+| `CLOSING_RECOVERY_NOT_AVAILABLE` | `pos_profile: string`, `opening_entry: string` |
+| `CLOSING_RECOVERY_REQUIRES_MANAGER` | `pos_profile: string`, `opening_entry: string`, `reason: string` |
 | `NO_OPEN_SESSION` | `pos_profile: string` |
 | `UNSUPPORTED_POS_MODE` | `configured_mode: string`, `required_mode: "POS Invoice"` |
 | `PRICE_CHANGED` | `accepted_grand_total: decimal string`, `authoritative_grand_total: decimal string`, `currency: string`, `items: SaleItem[]`, `taxes: SaleTax[]` |
@@ -834,6 +838,22 @@ Return quantity uses `return-quantity/v1`: an ASCII decimal-dot string, positive
   }
 }
 ```
+
+### `POST closing.recover`
+
+```json
+{
+  "pos_profile": "OUTLET-01"
+}
+```
+
+- **Approved**: Server-authoritative lost-key recovery. The endpoint takes only `pos_profile`; it requires no `X-Idempotency-Key`, because the lost key is exactly what it recovers from. Any other field is rejected with `INVALID_REQUEST`.
+- **Approved**: Identity comes only from the authenticated session, the authorized POS Profile, and the persisted Opening and Closing rows. The endpoint resumes or reports the Closing Entry that already exists and never creates one, so an Opening can never end up with a second Closing Entry.
+- **Approved**: Adoption requires cashier, POS Profile, company, Opening, and Closing state to all agree. Any mismatch returns HTTP 409 `CLOSING_RECOVERY_REQUIRES_MANAGER` with a coarse `reason` (`cashier_mismatch`, `profile_mismatch`, `opening_mismatch`, `closing_state_unrecoverable`, `closing_not_mobile_owned`) and never discloses the other cashier, profile, or document.
+- **Approved**: A `Draft` Closing owned by this cashier is submitted under the cashier's own authority; a Closing that is already durable (`queued`, `submitted`, `failed`) is reported without being submitted again. The response is the same `closing` receipt `closing.submit` returns.
+- **Approved**: Recovery is idempotent without a client key: the recovered Closing's stored transaction id is the request identity, so a repeat call replays the recorded outcome with `meta.replayed = true`.
+- **Approved**: While a Closing request still holds a live lease the endpoint returns HTTP 409 retryable `REQUEST_IN_PROGRESS` instead of racing it. With no unresolved Closing at all it returns HTTP 409 `CLOSING_RECOVERY_NOT_AVAILABLE`, and with no open session HTTP 422 `NO_OPEN_SESSION`.
+- **Approved**: A reservation that never reached a Closing Entry stops blocking the outlet once its lease expires, because nothing durable exists behind it. A reservation whose lease is still live keeps blocking.
 
 ### `GET closing.status`
 
