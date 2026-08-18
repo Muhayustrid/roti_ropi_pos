@@ -89,6 +89,34 @@ class TestAPIFoundation(IntegrationTestCase):
 		self.assertEqual(result["data"], {"value": "ok"})
 		self.assertEqual(result["meta"]["api_version"], "v1")
 
+	def test_api_endpoint_maps_known_error_after_the_transaction_was_rolled_back(self):
+		"""A full rollback discards the endpoint savepoint; the envelope must survive.
+
+		Same-key contention is converted into a retryable `MobilePOSAPIError`, but a
+		deadlock rolls back the whole transaction first, and InnoDB discards every
+		savepoint with it. Rolling back to the discarded savepoint then fails with
+		MariaDB 1305 inside the handler, which would replace the documented retryable
+		envelope with a native HTTP 500 — the opposite of a deterministic retry
+		contract.
+		"""
+
+		@api_endpoint
+		def raise_after_rollback():
+			frappe.db.rollback()
+			raise MobilePOSAPIError(
+				"REQUEST_IN_PROGRESS",
+				"contended",
+				status=409,
+				retryable=True,
+				details={"endpoint": "v1.sales.submit", "retry_after_seconds": 1},
+			)
+
+		frappe.response["http_status_code"] = None
+		result = raise_after_rollback()
+		self.assertEqual(result["error"]["code"], "REQUEST_IN_PROGRESS")
+		self.assertEqual(result["error"]["retryable"], True)
+		self.assertEqual(frappe.response["http_status_code"], 409)
+
 	def test_api_endpoint_re_raises_unknown_exception(self):
 		@api_endpoint
 		def raise_unknown():

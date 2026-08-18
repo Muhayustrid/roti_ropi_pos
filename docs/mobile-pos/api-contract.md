@@ -98,7 +98,7 @@
 | 409 | `SESSION_ALREADY_OPEN` | User/profile has a conflicting opening | No |
 | 409 | `SESSION_ALREADY_CLOSED` | Opening is no longer open | No |
 | 409 | `DOCUMENT_STATE_CONFLICT` | Operation conflicts with current ERPNext state | Usually no |
-| 409 | `REQUEST_IN_PROGRESS` | A durably started closing request is still being processed | Yes |
+| 409 | `REQUEST_IN_PROGRESS` | A request with this idempotency key is still being processed | Yes |
 | 422 | `NO_OPEN_SESSION` | Sale requires an active opening | No |
 | 422 | `UNSUPPORTED_POS_MODE` | Site is not configured for POS Invoice mode | No |
 | 422 | `PRICE_CHANGED` | Authoritative price differs from accepted client quote | No |
@@ -108,7 +108,7 @@
 | 422 | `INVALID_PAYMENT` | Payment rows violate profile/invoice rules | No |
 | 422 | `RETURN_LIMIT_EXCEEDED` | Requested return exceeds source sale | No |
 | 422 | `PROFILE_CONFIGURATION_INVALID` | Assigned POS Profile configuration cannot satisfy the requested operation | No |
-| 503 | `TEMPORARILY_UNAVAILABLE` | Dependency or worker unavailable | Yes |
+| 503 | `TEMPORARILY_UNAVAILABLE` | Dependency or worker unavailable, or a concurrent request holding this idempotency key did not complete | Yes |
 
 ### Error Detail Schemas
 
@@ -132,7 +132,7 @@
 | `INVALID_PAYMENT` | `mode_of_payment: string or null`, `reason: string`; invalid return modes also include `allowed_refund_modes: string[]` |
 | `RETURN_LIMIT_EXCEEDED` | `source_name: string`, `source_item_row: string`, `requested_qty: decimal string`, `remaining_qty: decimal string`, `refresh_endpoint: "v1.sales.get"` |
 | `PROFILE_CONFIGURATION_INVALID` | `pos_profile: string`, `field: string`, `reason: string` |
-| `TEMPORARILY_UNAVAILABLE` | `retry_after_seconds: integer` |
+| `TEMPORARILY_UNAVAILABLE` | `retry_after_seconds: integer`; idempotency contention also includes `endpoint: string` |
 
 - **Proposed**: `details` is always an object. Clients ignore additive unknown fields but may rely on the required fields above.
 

@@ -56,6 +56,20 @@ def error_envelope(error: MobilePOSAPIError, request_id: str, server_time: str) 
 	}
 
 
+def _rollback_to(savepoint: str) -> None:
+	"""Undo the endpoint's writes, falling back to a full rollback.
+
+	A transaction-level abort (InnoDB does this on deadlock) discards every
+	savepoint, so ``ROLLBACK TO SAVEPOINT`` then fails with MariaDB 1305. Falling
+	back keeps the documented error envelope instead of replacing it with a native
+	HTTP 500; after a full abort there is nothing finer left to undo.
+	"""
+	try:
+		frappe.db.rollback(save_point=savepoint)
+	except Exception:
+		frappe.db.rollback()
+
+
 def api_endpoint(func: Callable[..., dict]) -> Callable[..., dict]:
 	"""Common inner decorator for every v1 endpoint.
 
@@ -80,7 +94,7 @@ def api_endpoint(func: Callable[..., dict]) -> Callable[..., dict]:
 			# only owns stable expected-error envelopes and the savepoint.
 			return func(*args, **kwargs)
 		except MobilePOSAPIError as error:
-			frappe.db.rollback(save_point=savepoint)
+			_rollback_to(savepoint)
 			request_id = frappe.generate_hash(length=26)
 			server_time = frappe.utils.now_datetime().astimezone().isoformat()
 			_log.info("Mobile POS request %s failed: %s", request_id, error.code)
@@ -90,7 +104,7 @@ def api_endpoint(func: Callable[..., dict]) -> Callable[..., dict]:
 			frappe.db.rollback()
 			raise
 		except Exception:
-			frappe.db.rollback(save_point=savepoint)
+			_rollback_to(savepoint)
 			request_id = frappe.generate_hash(length=26)
 			_log.exception("Mobile POS request %s raised an unknown exception", request_id)
 			raise

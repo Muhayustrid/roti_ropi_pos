@@ -651,7 +651,15 @@ class TestIdempotency(IntegrationTestCase):
 		self.assertTrue(calls[0])
 		sleep_mock.assert_not_called()
 
-	def test_resolve_committed_request_missing_row_exhaustion_raises_invariant(self):
+	def test_resolve_committed_request_missing_row_exhaustion_is_retryable(self):
+		"""A winner that rolled back leaves no row, which is a retry-safe outcome.
+
+		The previous assertion expected `IDEMPOTENCY_INVARIANT` at HTTP 500 here.
+		That was wrong: reaching this function proves a concurrent insert held the
+		same `scope_key`, so an absent row means that transaction aborted and
+		nothing was committed under this key. Retrying the same key is safe, so the
+		contract must be a documented retryable error rather than a server fault.
+		"""
 		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})
 		calls = []
 
@@ -670,11 +678,166 @@ class TestIdempotency(IntegrationTestCase):
 				_resolve_committed_request(
 					_scope_key(KEY, "v1.sales.submit"), request_hash, "v1.sales.submit"
 				)
-		self.assertEqual(error.exception.code, "IDEMPOTENCY_INVARIANT")
-		self.assertEqual(error.exception.status, 500)
+		self.assertEqual(error.exception.code, "TEMPORARILY_UNAVAILABLE")
+		self.assertEqual(error.exception.status, 503)
+		self.assertTrue(error.exception.retryable)
+		self.assertEqual(error.exception.details.get("retry_after_seconds"), 1)
 		self.assertEqual(len(calls), CONFLICT_RESOLUTION_ATTEMPTS)
 		self.assertTrue(all(for_update is True for for_update in calls))
 		self.assertEqual(sleep_mock.call_count, CONFLICT_RESOLUTION_ATTEMPTS - 1)
+
+	def test_resolve_committed_request_lock_timeout_answers_without_retrying(self):
+		"""A completed lock wait is already proof of same-key contention.
+
+		`innodb_lock_wait_timeout` is 50 s on this deployment, so a timeout means the
+		winner held the row for 50 s — a 50 ms retry window cannot help, and retrying
+		would occupy the worker for up to `CONFLICT_RESOLUTION_ATTEMPTS` x 50 s while
+		telling the client to retry every second. Answer the retry contract at once.
+		"""
+		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})
+		calls = []
+
+		def fake_get_existing(scope_key, *, for_update=False):
+			calls.append(for_update)
+			raise frappe.QueryTimeoutError("lock wait timeout exceeded")
+
+		with (
+			patch(
+				"roti_ropi_pos.mobile_pos.idempotency._get_existing_request",
+				side_effect=fake_get_existing,
+			),
+			patch("roti_ropi_pos.mobile_pos.idempotency.time.sleep") as sleep_mock,
+		):
+			with self.assertRaises(MobilePOSAPIError) as error:
+				_resolve_committed_request(
+					_scope_key(KEY, "v1.sales.submit"), request_hash, "v1.sales.submit"
+				)
+		self.assertEqual(error.exception.code, "REQUEST_IN_PROGRESS")
+		self.assertTrue(error.exception.retryable)
+		self.assertEqual(calls, [True])
+		sleep_mock.assert_not_called()
+
+	def test_resolve_committed_request_deadlock_then_absent_row_is_retryable(self):
+		"""Contention on one attempt must not stick once a later read finds no row.
+
+		A deadlock is retried in place, so the loop can observe contention first and
+		an absent row afterwards. Nothing is in progress at that point, so the answer
+		must be the disappeared-winner contract rather than `REQUEST_IN_PROGRESS`.
+		"""
+		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})
+		calls = []
+
+		def fake_get_existing(scope_key, *, for_update=False):
+			calls.append(for_update)
+			if len(calls) == 1:
+				raise frappe.QueryDeadlockError("deadlock")
+			return None
+
+		with (
+			patch(
+				"roti_ropi_pos.mobile_pos.idempotency._get_existing_request",
+				side_effect=fake_get_existing,
+			),
+			patch("roti_ropi_pos.mobile_pos.idempotency.time.sleep"),
+		):
+			with self.assertRaises(MobilePOSAPIError) as error:
+				_resolve_committed_request(
+					_scope_key(KEY, "v1.sales.submit"), request_hash, "v1.sales.submit"
+				)
+		self.assertEqual(error.exception.code, "TEMPORARILY_UNAVAILABLE")
+		self.assertEqual(error.exception.status, 503)
+		self.assertEqual(len(calls), CONFLICT_RESOLUTION_ATTEMPTS)
+
+	def test_resolve_committed_request_row_seen_then_gone_is_retryable(self):
+		"""The last observation decides: a row that disappears means the winner aborted."""
+		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})
+		processing = frappe.get_doc(
+			{
+				"doctype": "Mobile POS Request",
+				"scope_key": _scope_key(KEY, "v1.sales.submit"),
+				"idempotency_key": KEY,
+				"endpoint": "v1.sales.submit",
+				"request_hash": request_hash,
+				"user": frappe.session.user,
+				"status": "Processing",
+			}
+		)
+		processing.insert(ignore_permissions=True, ignore_links=True)
+		calls = []
+
+		def fake_get_existing(scope_key, *, for_update=False):
+			calls.append(for_update)
+			return processing if len(calls) == 1 else None
+
+		with (
+			patch(
+				"roti_ropi_pos.mobile_pos.idempotency._get_existing_request",
+				side_effect=fake_get_existing,
+			),
+			patch("roti_ropi_pos.mobile_pos.idempotency.time.sleep"),
+		):
+			with self.assertRaises(MobilePOSAPIError) as error:
+				_resolve_committed_request(
+					_scope_key(KEY, "v1.sales.submit"), request_hash, "v1.sales.submit"
+				)
+		self.assertEqual(error.exception.code, "TEMPORARILY_UNAVAILABLE")
+		self.assertTrue(error.exception.retryable)
+		self.assertEqual(len(calls), CONFLICT_RESOLUTION_ATTEMPTS)
+
+	def test_resolve_committed_request_terminal_rejected_row_is_retryable_not_invariant(self):
+		"""A committed non-Completed row is contention, matching the uncontended path.
+
+		`execute_idempotent` already answers `REQUEST_IN_PROGRESS` for any existing
+		non-Completed row it finds before inserting; the contended path must not
+		answer HTTP 500 for the same observable state.
+		"""
+		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})
+		rejected = frappe.get_doc(
+			{
+				"doctype": "Mobile POS Request",
+				"scope_key": _scope_key(KEY, "v1.sales.submit"),
+				"idempotency_key": KEY,
+				"endpoint": "v1.sales.submit",
+				"request_hash": request_hash,
+				"user": frappe.session.user,
+				"status": "Rejected",
+				"http_status": 409,
+				"response_json": frappe.as_json({"ok": False}),
+				"resolved_at": "2026-01-01 00:00:00",
+				"expires_at": "2026-01-02 00:00:00",
+			}
+		)
+		rejected.insert(ignore_permissions=True, ignore_links=True)
+
+		with (
+			patch(
+				"roti_ropi_pos.mobile_pos.idempotency._get_existing_request",
+				return_value=rejected,
+			),
+			patch("roti_ropi_pos.mobile_pos.idempotency.time.sleep"),
+		):
+			with self.assertRaises(MobilePOSAPIError) as error:
+				_resolve_committed_request(
+					_scope_key(KEY, "v1.sales.submit"), request_hash, "v1.sales.submit"
+				)
+		self.assertEqual(error.exception.code, "REQUEST_IN_PROGRESS")
+		self.assertTrue(error.exception.retryable)
+
+	def test_resolve_committed_request_unknown_db_failure_is_not_masked(self):
+		"""Only deadlock and lock timeout are contention; anything else must escape."""
+		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})
+
+		with (
+			patch(
+				"roti_ropi_pos.mobile_pos.idempotency._get_existing_request",
+				side_effect=RuntimeError("connection lost"),
+			),
+			patch("roti_ropi_pos.mobile_pos.idempotency.time.sleep"),
+		):
+			with self.assertRaisesRegex(RuntimeError, "connection lost"):
+				_resolve_committed_request(
+					_scope_key(KEY, "v1.sales.submit"), request_hash, "v1.sales.submit"
+				)
 
 	def test_delete_expired_sets_hold_on_reference_mismatch(self):
 		request_hash = canonical_hash("v1.sales.submit", {"qty": "1"})

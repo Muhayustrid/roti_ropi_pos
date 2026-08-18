@@ -127,6 +127,22 @@ def _request_in_progress(operation_id: str) -> MobilePOSAPIError:
 	)
 
 
+def _contention_unresolved(operation_id: str) -> MobilePOSAPIError:
+	"""The row this request lost the insert race for is gone: the winner rolled back.
+
+	No work was committed under this idempotency key, so replaying the same key is
+	safe. Answer the documented retryable code rather than ``REQUEST_IN_PROGRESS``,
+	which promises a request that really is still running.
+	"""
+	return MobilePOSAPIError(
+		"TEMPORARILY_UNAVAILABLE",
+		"The concurrent request holding this idempotency key did not complete. Retry the same key.",
+		status=503,
+		retryable=True,
+		details={"endpoint": operation_id, "retry_after_seconds": 1},
+	)
+
+
 def _resolve_committed_request(scope_key: str, request_hash: str, operation_id: str) -> dict:
 	"""Resolve the row a concurrent insert lost to, via bounded locking reads.
 
@@ -134,36 +150,43 @@ def _resolve_committed_request(scope_key: str, request_hash: str, operation_id: 
 	committed (or is committing) the row this request lost the race for. Each
 	attempt takes a locking read (``for_update=True``) of the latest committed
 	state so it never observes a stale snapshot. A hash mismatch is a
-	permanent conflict and raises immediately. A still-``Processing`` row or a
-	momentarily missing row (the winner's insert has not committed yet) is
-	retried up to ``CONFLICT_RESOLUTION_ATTEMPTS`` times with a short delay.
+	permanent conflict and raises immediately. A still-unresolved row, a
+	momentarily missing row (the winner's insert has not committed yet), and a
+	deadlocked read (which proves another transaction holds this exact
+	``scope_key``) are retried up to ``CONFLICT_RESOLUTION_ATTEMPTS`` times with a
+	short delay.
+
+	The last observation decides the outcome. A present-but-unresolved row or a
+	deadlocked read is genuine same-key contention (``REQUEST_IN_PROGRESS``); an
+	absent row means the winner aborted and nothing was committed, which is
+	retry-safe but not "in progress". A lock-wait timeout answers immediately
+	rather than retrying: the wait already lasted ``innodb_lock_wait_timeout``, so
+	another short attempt cannot help and would multiply how long the worker is
+	held. Any other database failure is left to propagate: it is not contention
+	and must not be reported as a stable business error.
 	"""
-	last_status: str | None = None
-	last_deadlocked = False
+	contended = False
+	unresolved_row = False
 	for attempt in range(CONFLICT_RESOLUTION_ATTEMPTS):
 		try:
 			existing = _get_existing_request(scope_key, for_update=True)
-			last_deadlocked = False
+		except frappe.QueryTimeoutError:
+			raise _request_in_progress(operation_id) from None
 		except frappe.QueryDeadlockError:
-			existing = None
-			last_deadlocked = True
-		if existing:
-			_raise_if_hash_conflict(existing, request_hash, operation_id)
-			if existing.status == "Completed":
-				return replay_response(existing)
-			last_status = existing.status
-		elif not last_deadlocked:
-			last_status = None
+			# Detected instantly by InnoDB, so retrying in place is cheap.
+			contended = True
+		else:
+			contended = False
+			unresolved_row = bool(existing)
+			if existing:
+				_raise_if_hash_conflict(existing, request_hash, operation_id)
+				if existing.status == "Completed":
+					return replay_response(existing)
 		if attempt < CONFLICT_RESOLUTION_ATTEMPTS - 1:
 			time.sleep(CONFLICT_RESOLUTION_DELAY_SECONDS)
-	if last_status == "Processing" or last_deadlocked:
+	if contended or unresolved_row:
 		raise _request_in_progress(operation_id)
-	raise MobilePOSAPIError(
-		"IDEMPOTENCY_INVARIANT",
-		"A concurrent idempotency request could not be resolved.",
-		status=500,
-		details={"endpoint": operation_id},
-	)
+	raise _contention_unresolved(operation_id)
 
 
 def replay_response(request) -> dict:

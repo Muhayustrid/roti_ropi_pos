@@ -435,7 +435,7 @@ Scope is P0 only. P1/P2 findings, core Frappe/ERPNext files, `development.localh
 | # | Finding | Status |
 |---|---|---|
 | P0-1 | C-1 route-alias auth bypass | **Complete — green, reviewed, committed** |
-| P0-2 | I-5 / I-6 idempotency contention and stable error behaviour | Not started |
+| P0-2 | I-5 / I-6 idempotency contention and stable error behaviour | **Complete — green, mutation-verified, committed** |
 | P0-3 | I-2 Administrator elevation in closing | Not started |
 | P0-4 | I-1 closing transaction / savepoint boundary | Not started |
 | P0-5 | I-3 lost-key closing recovery | Not started |
@@ -498,8 +498,67 @@ Committed for this boundary in `fix: gate Mobile POS aliases by resolved dispatc
 `roti_ropi_pos/tests/helpers.py`, and this file. No migrate ran. `test_sales.py` and the
 extraction-design status line remain the pre-existing local edits described in §8.
 
-**Next action:** P0-2 — I-5 / I-6 idempotency contention and stable retry behaviour. Guardrails for that
-boundary: `REQUEST_IN_PROGRESS` only for proven same-key contention; rolled-back winner, deadlock, and
-lock timeout each need a deterministic retry contract; unknown DB failure stays a server/internal
-failure; `IDEMPOTENCY_INVARIANT` only for contractually impossible state; no sale/closing semantics
-change beyond what P0-2 requires.
+**Next action:** P0-3 — I-2, remove the Administrator elevation in `closing.py`. Not started in this
+session; it was deliberately deferred so P0-2 stayed a single boundary.
+
+### P0-2 / I-5 + I-6 — complete
+
+Root cause, measured on `mobile-pos-regression.localhost` rather than inferred
+(`innodb_lock_wait_timeout = 50`, `innodb_rollback_on_timeout = 0`):
+
+- I-5: `_resolve_committed_request` raised `IDEMPOTENCY_INVARIANT` at HTTP 500 when the row was absent
+  after every attempt. Reaching that function proves a duplicate-key insert on the unique `scope_key`
+  index, so an absent row can only mean the winning transaction aborted with nothing committed. That is
+  retry-safe, not a server fault.
+- I-6: only `frappe.QueryDeadlockError` was caught. A `SELECT ... FOR UPDATE` that hits the 50 s lock
+  wait raises `frappe.QueryTimeoutError`, which escaped uncaught and left the client with a native 500
+  instead of the documented retry contract.
+
+Fix:
+
+- `roti_ropi_pos/mobile_pos/idempotency.py`: the loop now tracks `contended` (deadlocked read) and
+  `unresolved_row` (row present but not `Completed`). Either one at exhaustion is proven same-key
+  contention and raises `REQUEST_IN_PROGRESS`; an absent row raises the new `_contention_unresolved`
+  (`TEMPORARILY_UNAVAILABLE`, 503, `retryable=True`, `details={endpoint, retry_after_seconds: 1}`).
+  `QueryTimeoutError` answers `REQUEST_IN_PROGRESS` immediately instead of retrying — the wait already
+  cost `innodb_lock_wait_timeout`, so up to 5 × 50 s ≈ 250 s in one worker would contradict
+  `retry_after_seconds: 1`. Every other database exception still propagates.
+- `roti_ropi_pos/mobile_pos/responses.py` (scope addition, see note below): new `_rollback_to` falls back
+  to a full rollback when `ROLLBACK TO SAVEPOINT` fails.
+
+Scope note: `responses.py` was not in the original P0-2 file list. It is required because InnoDB discards
+every savepoint on a transaction-level abort, verified directly in MariaDB
+(`ERROR 1305 (42000): SAVEPOINT sp1 does not exist`). Without `_rollback_to`, `api_endpoint` raised 1305
+while mapping the new retryable error and replaced the envelope with a native HTTP 500 — the opposite of
+a deterministic retry contract.
+
+Evidence (all fresh, `mobile-pos-regression.localhost`):
+
+- RED before the fix: `Ran 6 tests ... FAILED (failures=3, errors=2)`, including
+  `'IDEMPOTENCY_INVARIANT' != 'TEMPORARILY_UNAVAILABLE'`, `'IDEMPOTENCY_INVARIANT' != 'REQUEST_IN_PROGRESS'`,
+  and `frappe.exceptions.QueryTimeoutError: lock wait timeout exceeded` escaping uncaught.
+- RED for the savepoint defect: `MySQLdb.OperationalError: (1305, 'SAVEPOINT mobile_pos_04bfc4645f does not exist')`.
+- GREEN: `test_idempotency` `Ran 32 tests OK` exit 0; `test_api_foundation` `Ran 15 tests OK` exit 0.
+- Mutations, each restored afterwards: drop the `QueryTimeoutError` catch → 2 errors; drop `unresolved_row`
+  from the final branch → 2 failures; widen the catch to bare `Exception` → 1 error; remove the
+  `_rollback_to` fallback → `test_api_foundation` 1 error; remove `contended = False` from the `else`
+  branch (sticky contention) → `test_idempotency` 1 failure.
+- Regression by baseline diffing, not assumption: `git stash` of exactly the changed files produced
+  before/after logs for `test_sales`, `test_closing`, `test_mobile_pos_flow`, `test_return_task10`,
+  `test_sale_task9`. Each fails on this site with a byte-identical failure set in both states
+  (pre-existing environmental gaps: `KeyError: 'data'`, `PERMISSION_DENIED` in place of domain codes,
+  `AssertionError: Sale transaction deadlocked twice.`).
+- Ruff 0.14.10 `check` all passed; `format --check` 4 files already formatted; `git diff --check` clean.
+- One existing assertion was deliberately rewritten
+  (`test_resolve_committed_request_missing_row_exhaustion_is_retryable`); the reason is recorded in the
+  test's own docstring because the old contract was the defect.
+
+Deferred out of this boundary, deliberately: `closing.py:106-112` repeats both defects and adds an
+`AttributeError` on a `None` row — that belongs to P0-4/P0-5. A stranded `Processing` row still has no
+exit path, and no `Retry-After` header is emitted; both are Minor, not P0-2.
+
+Committed for this boundary in `fix: stabilize idempotency contention recovery`:
+`roti_ropi_pos/mobile_pos/idempotency.py`, `roti_ropi_pos/mobile_pos/responses.py`,
+`roti_ropi_pos/tests/test_idempotency.py`, `roti_ropi_pos/tests/test_api_foundation.py`,
+`docs/mobile-pos/api-contract.md`, and this file. No migrate ran; no schema or DocType JSON changed.
+`test_sales.py` and the extraction-design status line remain the pre-existing local edits from §8.
