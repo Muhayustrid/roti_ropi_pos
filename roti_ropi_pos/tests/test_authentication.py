@@ -5,6 +5,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 
 from roti_ropi_pos.mobile_pos.auth_hook import (
+	CASHIER_ROLE,
 	MOBILE_POS_PATHS,
 	validate_mobile_api_scope,
 	validate_mobile_oauth_request,
@@ -17,7 +18,9 @@ from roti_ropi_pos.mobile_pos.authorization import (
 )
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.tests.helpers import (
+	DESK_ROLE,
 	clear_fake_request,
+	grant_role_row,
 	make_bearer_token,
 	make_cashier,
 	make_oauth_client,
@@ -341,3 +344,68 @@ class TestAuthentication(IntegrationTestCase):
 		with self._request(path=self.QUOTE_CART_PATH, user=plain, authorization="Bearer quote-plain"):
 			with self.assertRaises(frappe.AuthenticationError):
 				validate_mobile_api_scope()
+
+	DESK_PATHS = (
+		"/app/setup-wizard",
+		"/api/method/frappe.desk.page.setup_wizard.setup_wizard.setup_complete",
+		"/api/method/frappe.desk.desktop.get_workspace_sidebar_items",
+		"/api/resource/Company",
+	)
+
+	def _promote_cashier_to_desk_account(self) -> str:
+		"""Give the website-only cashier a desk role, the shape the Setup Wizard
+		produces when `_get_default_roles` grants every role to a System User."""
+		grant_role_row(self.cashier, DESK_ROLE)
+		self.assertTrue(frappe.get_doc("User", self.cashier).has_desk_access())
+		return self.cashier
+
+	def test_administrator_desk_and_setup_wizard_requests_are_not_blocked(self):
+		for path in self.DESK_PATHS:
+			with self.subTest(path=path), self._request(path=path, user="Administrator"):
+				validate_mobile_api_scope()
+
+	def test_desk_user_holding_cashier_role_is_not_scoped_to_mobile_api(self):
+		desk_user = self._promote_cashier_to_desk_account()
+		for path in self.DESK_PATHS:
+			with self.subTest(path=path), self._request(path=path, user=desk_user):
+				validate_mobile_api_scope()
+
+	def test_website_only_cashier_is_still_blocked_from_desk_paths(self):
+		self.assertFalse(frappe.get_doc("User", self.cashier).has_desk_access())
+		for path in self.DESK_PATHS:
+			with self.subTest(path=path), self._request(path=path, user=self.cashier):
+				with self.assertRaises(frappe.PermissionError):
+					validate_mobile_api_scope()
+
+	def test_desk_user_with_cashier_role_still_needs_a_valid_bearer_on_v1(self):
+		"""Desk access relaxes the scope fence only; it grants no Mobile POS identity."""
+		desk_user = self._promote_cashier_to_desk_account()
+		with self._request(user=desk_user, authorization=""):
+			with self.assertRaises(frappe.AuthenticationError):
+				validate_mobile_api_scope()
+
+	def test_administrator_is_never_accepted_as_a_mobile_pos_bearer_identity(self):
+		"""No Administrator bypass: the v1 gate rejects the built-in account even
+		when a token is minted for it, because it holds no explicit cashier row."""
+		admin_token = f"admin-bearer-{frappe.generate_hash(length=8)}"
+		make_bearer_token(admin_token, client_id=CLIENT_ID, user="Administrator")
+		with self._request(user="Administrator", authorization=f"Bearer {admin_token}"):
+			with self.assertRaises(frappe.AuthenticationError):
+				validate_mobile_api_scope()
+
+	def test_built_in_accounts_are_refused_even_holding_an_explicit_cashier_row(self):
+		"""Construct the role row rather than trust the site's current state: a
+		built-in account must never gain a Mobile POS identity from it."""
+		grant_role_row("Administrator", CASHIER_ROLE)
+		self.assertTrue(
+			frappe.db.exists(
+				"Has Role", {"parent": "Administrator", "parenttype": "User", "role": CASHIER_ROLE}
+			)
+		)
+		admin_token = f"admin-role-{frappe.generate_hash(length=8)}"
+		make_bearer_token(admin_token, client_id=CLIENT_ID, user="Administrator")
+		with self._request(user="Administrator", authorization=f"Bearer {admin_token}"):
+			with self.assertRaises(frappe.AuthenticationError):
+				validate_mobile_api_scope()
+		with self._request(path="/api/method/frappe.client.get", user="Administrator"):
+			validate_mobile_api_scope()

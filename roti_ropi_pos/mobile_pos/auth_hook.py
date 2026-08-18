@@ -43,11 +43,11 @@ def validate_mobile_oauth_request(path: str, user: str) -> None:
 	authorization = frappe.get_request_header("Authorization", "")
 	client_id = frappe.form_dict.get("client_id") or _basic_username(authorization)
 	is_mobile_client = bool(mobile_client_id and client_id == mobile_client_id)
-	is_mobile_cashier = _is_mobile_cashier(user)
+	is_mobile_only = _is_mobile_only_account(user)
 	command = frappe.form_dict.get("cmd")
 	is_login_submit = path == "/api/method/login" and command == "login"
 
-	if command and (is_mobile_client or is_mobile_cashier) and not is_login_submit:
+	if command and (is_mobile_client or is_mobile_only) and not is_login_submit:
 		raise frappe.PermissionError("Legacy command dispatch is not allowed.")
 	if not is_mobile_client:
 		return
@@ -79,11 +79,36 @@ def _basic_username(authorization: str) -> str | None:
 		return None
 
 
-def _is_mobile_cashier(user: str) -> bool:
+def _has_cashier_role(user: str) -> bool:
+	"""Return True when the account carries an explicit Mobile POS Cashier role row.
+
+	Read the `Has Role` table rather than `frappe.get_roles`, which returns every
+	existing role for `Administrator` and would therefore report the cashier role
+	for an account that was never granted it. Built-in accounts are excluded so a
+	bearer token can never authorise `Administrator` or `Guest`.
+	"""
 	return bool(
-		user not in {"Guest", "Administrator"}
-		and frappe.db.exists("Has Role", {"parent": user, "role": CASHIER_ROLE})
+		user not in frappe.STANDARD_USERS
+		and frappe.db.exists("Has Role", {"parent": user, "parenttype": "User", "role": CASHIER_ROLE})
 	)
+
+
+def _is_mobile_only_account(user: str) -> bool:
+	"""Return True when the account exists solely to drive the Mobile POS API.
+
+	Desk access is the framework's own boundary: core derives `User.user_type` from
+	whether any assigned role sets `Role.desk_access`
+	(`frappe.core.doctype.user.user.User.set_system_user`), and the shipped
+	`Mobile POS Cashier` role sets `desk_access = 0`. An account that holds a desk
+	role is a Desk account and keeps normal Frappe authorisation even when it also
+	carries the cashier role — which the Setup Wizard grants to the first System
+	User along with every other role
+	(`frappe.desk.page.setup_wizard.setup_wizard._get_default_roles`).
+
+	`User.has_desk_access` is asked directly rather than reading the denormalised
+	`user_type`, so the boundary cannot desynchronise from the assigned roles.
+	"""
+	return _has_cashier_role(user) and not frappe.get_cached_doc("User", user).has_desk_access()
 
 
 def validate_mobile_api_scope() -> None:
@@ -110,10 +135,10 @@ def validate_mobile_api_scope() -> None:
 			or not token.expiration_time
 			or frappe.utils.now_datetime() >= token.expiration_time
 			or not frappe.db.get_value("User", user, "enabled")
-			or not _is_mobile_cashier(user)
+			or not _has_cashier_role(user)
 		):
 			raise frappe.AuthenticationError("The Mobile POS bearer token is not authorized.")
 		return
 
-	if _is_mobile_cashier(user) and path not in MOBILE_POS_BROWSER_PATHS:
+	if _is_mobile_only_account(user) and path not in MOBILE_POS_BROWSER_PATHS:
 		raise frappe.PermissionError("This account may access only the Mobile POS API.")

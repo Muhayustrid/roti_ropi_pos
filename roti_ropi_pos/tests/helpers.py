@@ -3,6 +3,7 @@ from __future__ import annotations
 import frappe
 
 CASHIER_ROLE = "Mobile POS Cashier"
+DESK_ROLE = "Sales User"
 
 
 def make_cashier(email: str) -> str:
@@ -24,6 +25,26 @@ def make_cashier(email: str) -> str:
 	user.insert(ignore_permissions=True)
 	frappe.cache.hdel("roles", email)
 	return email
+
+
+def grant_role_row(user: str, role: str) -> None:
+	"""Insert a raw `Has Role` row on an existing account and refresh its caches.
+
+	Roles are granted by child row rather than `User.save()` so built-in accounts
+	are reachable and no extra User is created (core throttles user creation to
+	`throttle_user_limit` per hour). Test isolation rolls the row back.
+	"""
+	frappe.get_doc(
+		{
+			"doctype": "Has Role",
+			"parent": user,
+			"parenttype": "User",
+			"parentfield": "roles",
+			"role": role,
+		}
+	).insert(ignore_permissions=True)
+	frappe.clear_document_cache("User", user)
+	frappe.cache.hdel("roles", user)
 
 
 def make_pos_profile(
