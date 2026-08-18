@@ -1,10 +1,12 @@
 # PROJECT_STATE.md — AI session resume checkpoint
 
-**Last updated:** 2026-08-19, after P0-6 (audit finding I-4) went green and was committed.
+**Last updated:** 2026-08-19, after P0-7 (audit finding I-16) went green on the four-app site and was
+committed.
 **Resume point:** Mobile POS backend readiness remediation, P0 only, from
-`docs/mobile-pos/backend-readiness-audit.md`. P0-1 through P0-6 are complete, mutation-verified, and
-committed. P0-7 (I-16 money-path evidence restoration on a site holding all four apps) is the next
-boundary. See §11.
+`docs/mobile-pos/backend-readiness-audit.md`. P0-1 through P0-7 are complete, mutation-verified, and
+committed; all 15 Mobile POS modules (370 tests) are green on `selling-cutover.localhost`, the only site
+carrying all four owned apps. Nothing in the P0 scope is outstanding. Remaining audit findings are P1/P2
+and out of this workstream's scope. See §11.
 
 The app-ownership extraction project (Phases 0-3) is complete; its record below stays as history.
 
@@ -409,7 +411,8 @@ All intended project source is committed. Deliberate local state remains outside
 - Bakery keeps the protected bundle overlay unstaged at SHA-256
   `8b04313861b211aa17cb4d0c87c372d32e2f8b0d642b94292e58a7865ae1bbf1`. The committed bundle is empty.
 - Bakery keeps `test_desk_sidebar.py`, `diference.md`, and `graphify-out/` local.
-- Roti keeps the pre-existing `test_sales.py` teardown and extraction-design status edit local.
+- Roti keeps the extraction-design status edit local. The former local `test_sales.py` teardown edit is no
+  longer local: it was folded into the P0-7 fixture commit `7c24cd2`.
 - Tool directories, plan scratch files, and `skills-lock.json` remain local.
 - ERPNext keeps its pre-existing `banking/yarn.lock` edit. Frappe and ERPNext received no project commit.
 
@@ -427,9 +430,16 @@ PROJECT COMPLETE — ALL INTENDED CHANGES COMMITTED, PUSHED, AND MERGED TO MAIN
 Scope is P0 only. P1/P2 findings, core Frappe/ERPNext files, `development.localhost`,
 `rotiropi-fresh.localhost`, and IMIN hardware work are all out of scope.
 
-**Test site:** `mobile-pos-regression.localhost` (dedicated; created for this workstream). Bench root
-`/workspace/development/frappe-bench` in `frappe_docker_devcontainer-frappe-1`. Installed apps there:
-`frappe`, `erpnext`, `bakery_manufacturing`, `roti_ropi_pos` only.
+**Test sites (both dedicated to this workstream; no operational site is used).** Bench root
+`/workspace/development/frappe-bench` in `frappe_docker_devcontainer-frappe-1`.
+
+- `mobile-pos-regression.localhost` — P0-1 through P0-6. Installed apps: `frappe`, `erpnext`,
+  `bakery_manufacturing`, `roti_ropi_pos` only, so any assertion needing `stock_additional` or
+  `selling_additional` fails here as a missing-app baseline rather than a regression.
+- `selling-cutover.localhost` — P0-7, the final integration gate. Installed apps: `frappe`, `erpnext`,
+  `payments`, `hrms`, `bakery_manufacturing`, `stock_additional`, `selling_additional`,
+  `pos_direct_print`, `roti_ropi_pos`; `allow_tests: true`, `throttle_user_limit: 5000`. This is the only
+  site that carries all four owned apps, so it is the only site whose green run counts as I-16 evidence.
 
 **Order (one finding per boundary, RED → minimal fix → GREEN → mutation → diff review → checkpoint):**
 
@@ -441,7 +451,7 @@ Scope is P0 only. P1/P2 findings, core Frappe/ERPNext files, `development.localh
 | P0-4 | I-1 closing transaction / savepoint boundary | **Complete — green, mutation-verified, committed** |
 | P0-5 | I-3 lost-key closing recovery | **Complete — green, mutation-verified, committed** |
 | P0-6 | I-4 ERPNext sale/return error mapping | **Complete — green, mutation-verified, committed** |
-| P0-7 | I-16 money-path evidence restoration | Not started |
+| P0-7 | I-16 money-path evidence restoration | **Complete — full suite green on the four-app site, committed** |
 
 ### P0-1 / C-1 — complete
 
@@ -892,3 +902,80 @@ Verification (all on `mobile-pos-regression.localhost`):
   the assertion requires. The same module is `Ran 19 tests in 0.126s OK` on `selling-cutover.localhost`,
   which does have `stock_additional` installed. The test asserts a barcode-scanner override registration
   and touches no part of the invoice persistence path changed by P0-6.
+
+### P0-7 / I-16 — complete
+
+**Qualifying site.** I-16 asks for money-path evidence on a site that carries every app Roti depends on,
+so `mobile-pos-regression.localhost` (only `frappe, erpnext, bakery_manufacturing, roti_ropi_pos`) cannot
+produce it. P0-7 ran on `selling-cutover.localhost`: `frappe, erpnext, payments, hrms,
+bakery_manufacturing, stock_additional, selling_additional, pos_direct_print, roti_ropi_pos`,
+`allow_tests: true`. That site holds all four owned apps (`stock_additional`, `selling_additional`,
+`bakery_manufacturing`, `roti_ropi_pos`), so a missing-app failure can no longer be mistaken for
+evidence.
+
+**Four fixture faults, all measured, all fixed in test code** (commit `7c24cd2`, 5 files, +152/-24 — no
+production file, no Frappe or ERPNext core file, no schema or DocType JSON):
+
+1. *Test discovery died before a single test ran.* `erpnext/tests/utils.py:2989` instantiates
+   `BootStrapTestData()` at module import scope; `__init__` → `make_master_data` → `make_price_list` →
+   `make_records(["price_list_name", "enabled", "selling", "buying", "currency"], ...)`. The existence
+   check includes `currency` and ERPNext hardcodes `"INR"`, so on a site whose `Standard Buying` /
+   `Standard Selling` carry `IDR` the check misses and the insert collides:
+   `DuplicateEntryError: ('Price List', 'Standard Buying', ...)`. Any Roti test module importing an
+   ERPNext *test* module inherits that import-time side effect. Fixed by owning
+   `helpers.set_default_account_for_mode_of_payment` (14 lines), and guarded by the new
+   `test_source_contracts.TestNoERPNextTestModuleImports` AST contract. Frappe's own test modules are
+   deliberately out of that contract's scope: `frappe/tests/utils/generators.py:282` `_try_create` guards
+   on `frappe.db.exists`, so the Frappe generator is currency-safe.
+2. *`INSUFFICIENT_STOCK` masked `INVALID_BATCH` and `INVALID_SERIAL_NUMBER`.*
+   `get_stock_availability` (`erpnext/accounts/doctype/pos_invoice/pos_invoice.py:901`) returns
+   `get_bin_qty - get_pos_reserved_qty`, and `get_pos_reserved_qty` sums `stock_qty` over submitted,
+   unconsolidated POS Invoices — so availability drifts downwards on a shared site with every committed
+   sale. Measured: bin 658 / reserved 1248 → available **-590** on `selling-cutover`, bin -735 /
+   reserved 12 → **-747** on `mobile-pos-regression`. A fixed `make_stock_entry` seed cannot guarantee a
+   sellable fixture. Fixed by `helpers.ensure_pos_availability`, which measures what ERPNext itself
+   reports and tops up the shortfall.
+3. *The oversell guard was silently disabled.* `is_negative_stock_allowed`
+   (`erpnext/stock/stock_ledger.py:2357`) returns True if `Stock Settings.allow_negative_stock` **or**
+   `Item.allow_negative_stock`, and ERPNext's bootstrap ships `_Test Item` with
+   `"allow_negative_stock": True` (`erpnext/tests/utils.py:1341`). `TestSaleSubmit` now clears the flag
+   for its duration and restores the saved value in tearDown. The write is committed because the
+   concurrency test reads it from separate connections; a suite killed mid-run therefore leaves the flag
+   at 0 on the test site, which is the safe direction (guard on, not off).
+4. *Lifecycle ordering plus a site-specific Stock Setting.*
+   `validate_allow_to_set_serial_batch`
+   (`erpnext/stock/doctype/serial_and_batch_bundle/serial_and_batch_bundle.py:147-152`) throws unless
+   `Stock Settings.enable_serial_and_batch_no_for_item` is set; measured 0 on `selling-cutover`, 1 on
+   `mobile-pos-regression`. `TestMobilePOSLifecycle` now saves, sets, and restores it, and the
+   Mode-of-Payment account setup moved ahead of `profile.save` because ERPNext's POS Profile validate
+   rejects a payment mode with no default Cash or Bank account for the profile's company.
+
+**Two site-state gaps closed on the test site only** (no production site, no operational site touched):
+
+- The `Mobile POS Cashier` owner-scoped Sales Invoice grant was absent. `selling-cutover.localhost` had
+  not been fixture-synced since commit `9c0b7c7 fix: run closing consolidation under cashier authority`
+  added `mobile-pos-cdp-sales-invoice` to `roti_ropi_pos/fixtures/custom_docperm.json`, so
+  `test_closing` failed 15 / errored 4, nearly all reducing to `details: {'reason': 'PermissionError'}`.
+  Resolved with `frappe.utils.fixtures.sync_fixtures("roti_ropi_pos")` on that site — the app's own
+  fixture set, not a hand-edited permission. Before / after snapshot diff: **5 rows added, 0 removed,
+  0 changed** — the four standard `Sales Invoice` rows the fixture carries plus
+  `mobile-pos-cdp-sales-invoice` (`read 0, write 1, create 1, submit 1, if_owner 1`). No Administrator
+  elevation was introduced; the resulting effective grant is exactly the owner-scoped one AGENTS.md
+  documents, and `test_cashier_sales_invoice_grant_is_owner_scoped_not_broad` holds it.
+- `throttle_user_limit` was unset, so core's `throttle_user_creation`
+  (`frappe/core/doctype/user/user.py:1353`) defaulted to 60 and
+  `test_twenty_concurrent_attempts_create_one_opening_and_one_request` hit
+  `ValidationError: Throttled`. Set to `5000` in that site's `site_config.json`, matching the remedy
+  already recorded for P0-3 on `mobile-pos-regression.localhost`. The test calls core's own
+  `create_user`, which no test-code guard can reach.
+
+**Final evidence — all 15 Mobile POS modules run one at a time on `selling-cutover.localhost`, 370 tests,
+zero failures, zero errors:** `test_api_foundation` 17, `test_authentication` 36, `test_bootstrap` 9,
+`test_catalog` 19, `test_closing` 67, `test_customers` 7, `test_idempotency` 32, `test_mobile_pos_flow` 1,
+`test_opening_amounts` 21, `test_return_task10` 23, `test_sale_task9` 60, `test_sales` 28,
+`test_sessions` 10, `test_source_contracts` 38, `test_user_override` 2 — every one `OK`. `test_catalog`
+19 OK is the same module that fails as a missing-app baseline on `mobile-pos-regression.localhost`, which
+confirms the four-app site is the one supplying real coverage.
+
+The server remains authoritative for price, tax, grand total, payable, return amount, and closing values.
+Ruff 0.14.10 check and format clean, `git diff --check` clean.
