@@ -99,11 +99,6 @@ All rows remain subject to Critical finding C-1 and the incorrect `meta.server_t
 - **Android impact:** The API can report success for work the cashier could not perform under the documented authorization model.
 - **Recommended direction:** Run closing under the authenticated cashier and the exact required DocType permissions. Keep service-level privilege limited to Mobile POS Request records.
 
-- **Evidence:** Both paths call `frappe.set_user("Administrator")` around POS Closing Entry work. The endpoint already checks cashier create and submit permission. Project policy requires normal permissions for ERPNext business documents.
-- **Business impact:** Closing hooks run with broader authority than the authenticated cashier. Permission failures can be hidden.
-- **Android impact:** The API can report success for work the cashier could not perform under the documented authorization model.
-- **Recommended direction:** Run closing under the authenticated cashier and the exact required DocType permissions. Keep service-level privilege limited to Mobile POS Request records.
-
 ### I-3 — An abandoned committed Closing Draft can block the outlet indefinitely
 
 - **File and function:** `roti_ropi_pos/mobile_pos/closing.py:execute_closing_submit`
