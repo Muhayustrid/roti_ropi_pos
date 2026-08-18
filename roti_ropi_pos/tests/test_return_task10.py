@@ -5,16 +5,18 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import frappe
-from erpnext.accounts.doctype.mode_of_payment.test_mode_of_payment import (
-	set_default_account_for_mode_of_payment,
-)
 from erpnext.stock.doctype.stock_entry.stock_entry_utils import make_stock_entry
 from frappe.tests import IntegrationTestCase
 
 from roti_ropi_pos.api.v1 import sales as sales_api
 from roti_ropi_pos.mobile_pos import invoices, validation
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
-from roti_ropi_pos.tests.helpers import close_test_openings, make_cashier, make_opening_entry
+from roti_ropi_pos.tests.helpers import (
+	close_test_openings,
+	make_cashier,
+	make_opening_entry,
+	set_default_account_for_mode_of_payment,
+)
 from roti_ropi_pos.tests.test_sessions import COMPANY, WAREHOUSE, make_valid_profile
 
 

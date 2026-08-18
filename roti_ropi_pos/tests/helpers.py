@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 import frappe
+from erpnext.stock.doctype.stock_entry.stock_entry_utils import make_stock_entry
 from werkzeug.test import EnvironBuilder
 
 CASHIER_ROLE = "Mobile POS Cashier"
@@ -227,3 +230,48 @@ def make_customer_group(group_name: str, *, parent_customer_group: str = "All Cu
 	doc.flags.ignore_links = True
 	doc.insert(ignore_permissions=True)
 	return doc.name
+
+
+def set_default_account_for_mode_of_payment(mode_of_payment, company: str, account: str) -> None:
+	"""Point one Mode of Payment at a company default account.
+
+	Behaviourally the same as ERPNext's test helper of this name, kept here so no
+	Roti test module has to import an ERPNext *test* module. Importing one pulls in
+	``erpnext.tests.utils``, which instantiates ``BootStrapTestData()`` at module
+	scope; that bootstrap re-inserts ``Standard Buying`` / ``Standard Selling``
+	whenever the site's price-list currency differs from the "INR" it hardcodes, so
+	on any non-INR site test discovery dies with ``DuplicateEntryError`` before a
+	single test runs. This helper needs none of that bootstrap.
+	"""
+	mode_of_payment.reload()
+	existing = {"parent": mode_of_payment.mode_of_payment, "company": company}
+	if frappe.db.exists("Mode of Payment Account", existing):
+		frappe.db.set_value("Mode of Payment Account", existing, "default_account", account)
+		return
+
+	mode_of_payment.append("accounts", {"company": company, "default_account": account})
+	mode_of_payment.save()
+
+
+def ensure_pos_availability(item_code: str, warehouse: str, qty) -> Decimal:
+	"""Top up ``item_code`` in ``warehouse`` until ERPNext reports ``qty`` POS-available.
+
+	POS availability is ``Bin.actual_qty`` minus the quantity reserved by submitted,
+	unconsolidated POS Invoices, so on a shared test site it drifts downwards every
+	time any suite commits a sale. Seeding a fixed quantity is therefore not enough
+	to guarantee a sellable fixture; the shortfall has to be measured against what
+	ERPNext itself reports and then topped up.
+	"""
+	from erpnext.accounts.doctype.pos_invoice.pos_invoice import get_stock_availability
+
+	target = Decimal(str(qty))
+	available = Decimal(str(get_stock_availability(item_code, warehouse)[0]))
+	if available < target:
+		make_stock_entry(
+			target=warehouse,
+			item_code=item_code,
+			qty=float(target - available),
+			basic_rate=100,
+		)
+		available = Decimal(str(get_stock_availability(item_code, warehouse)[0]))
+	return available

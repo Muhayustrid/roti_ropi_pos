@@ -13,9 +13,6 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import frappe
-from erpnext.accounts.doctype.mode_of_payment.test_mode_of_payment import (
-	set_default_account_for_mode_of_payment,
-)
 from erpnext.stock.doctype.stock_entry.stock_entry_utils import make_stock_entry
 from frappe.auth import validate_auth_via_hooks
 from frappe.tests import IntegrationTestCase
@@ -29,10 +26,12 @@ from roti_ropi_pos.api.v1 import sessions as sessions_api
 from roti_ropi_pos.tests.helpers import (
 	clear_fake_request,
 	close_test_openings,
+	ensure_pos_availability,
 	make_bearer_token,
 	make_cashier,
 	make_oauth_client,
 	make_opening_entry,
+	set_default_account_for_mode_of_payment,
 	set_request,
 )
 from roti_ropi_pos.tests.test_sessions import COMPANY, WAREHOUSE, make_valid_profile
@@ -59,6 +58,11 @@ class TestMobilePOSLifecycle(IntegrationTestCase):
 		frappe.db.set_single_value("POS Settings", "invoice_type", "POS Invoice")
 		self._saved_neg_stock = frappe.db.get_single_value("Stock Settings", "allow_negative_stock")
 		frappe.db.set_single_value("Stock Settings", "allow_negative_stock", 1)
+		# The batch fixture below builds a Serial and Batch Bundle, which ERPNext
+		# refuses outright unless this setting is on; it is off on a site whose
+		# setup wizard never enabled it.
+		self._saved_snb = frappe.db.get_single_value("Stock Settings", "enable_serial_and_batch_no_for_item")
+		frappe.db.set_single_value("Stock Settings", "enable_serial_and_batch_no_for_item", 1)
 
 		self.saved_client_id = frappe.conf.get("mobile_pos_oauth_client_id")
 		frappe.conf["mobile_pos_oauth_client_id"] = CLIENT_ID
@@ -77,6 +81,16 @@ class TestMobilePOSLifecycle(IntegrationTestCase):
 		self.profile = make_valid_profile(f"Mobile POS E2E {frappe.generate_hash(length=8)}", self.cashier)
 		item_group = frappe.db.get_value("Item", ITEM, "item_group")
 		self.profile.append("item_groups", {"item_group": item_group})
+		# Both sale modes need a company account before the profile references them:
+		# ERPNext's POS Profile validate rejects a payment mode that has no default
+		# Cash or Bank account for the profile's company.
+		cash = frappe.get_doc("Mode of Payment", "Cash")
+		if not frappe.db.exists("Mode of Payment Account", {"parent": "Cash", "company": COMPANY}):
+			cash.append("accounts", {"company": COMPANY, "default_account": "Sales - _TC"})
+			cash.save()
+		set_default_account_for_mode_of_payment(
+			frappe.get_doc("Mode of Payment", BANK_MODE), COMPANY, "_Test Bank - _TC"
+		)
 		# Cash handles refunds; Bank Draft proves distinct modes can fully settle one sale.
 		for row in self.profile.payments:
 			if row.mode_of_payment == "Cash":
@@ -86,17 +100,8 @@ class TestMobilePOSLifecycle(IntegrationTestCase):
 
 		self._uom = frappe.db.get_value("Item", ITEM, "stock_uom")
 		self._ensure_item_price()
-		make_stock_entry(target=WAREHOUSE, item_code=ITEM, qty=500, basic_rate=100)
+		ensure_pos_availability(ITEM, WAREHOUSE, 500)
 		self._batch_item, self._batch_no, self._batch_uom = self._make_batch_uom_fixture(item_group)
-
-		# Ensure both sale modes have company accounts.
-		cash = frappe.get_doc("Mode of Payment", "Cash")
-		if not frappe.db.exists("Mode of Payment Account", {"parent": "Cash", "company": COMPANY}):
-			cash.append("accounts", {"company": COMPANY, "default_account": "Sales - _TC"})
-			cash.save()
-		set_default_account_for_mode_of_payment(
-			frappe.get_doc("Mode of Payment", BANK_MODE), COMPANY, "_Test Bank - _TC"
-		)
 
 	def tearDown(self) -> None:
 		clear_fake_request()
@@ -105,6 +110,9 @@ class TestMobilePOSLifecycle(IntegrationTestCase):
 		close_test_openings(self.cashier)
 		frappe.db.set_single_value("POS Settings", "invoice_type", self.saved_pos_mode or "POS Invoice")
 		frappe.db.set_single_value("Stock Settings", "allow_negative_stock", self._saved_neg_stock or 0)
+		frappe.db.set_single_value(
+			"Stock Settings", "enable_serial_and_batch_no_for_item", self._saved_snb or 0
+		)
 		frappe.db.commit()
 		if self.saved_client_id is None:
 			frappe.conf.pop("mobile_pos_oauth_client_id", None)

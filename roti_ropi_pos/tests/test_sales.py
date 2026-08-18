@@ -5,16 +5,18 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import frappe
-from erpnext.accounts.doctype.mode_of_payment.test_mode_of_payment import (
-	set_default_account_for_mode_of_payment,
-)
-from erpnext.stock.doctype.stock_entry.stock_entry_utils import make_stock_entry
 from frappe.tests import IntegrationTestCase
 
 from roti_ropi_pos.api.v1 import sales as sales_api
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.mobile_pos.invoices import submit_sale
-from roti_ropi_pos.tests.helpers import close_test_openings, make_cashier, make_opening_entry
+from roti_ropi_pos.tests.helpers import (
+	close_test_openings,
+	ensure_pos_availability,
+	make_cashier,
+	make_opening_entry,
+	set_default_account_for_mode_of_payment,
+)
 from roti_ropi_pos.tests.test_sessions import COMPANY, WAREHOUSE, make_valid_profile
 
 
@@ -76,7 +78,17 @@ class TestSaleSubmit(IntegrationTestCase):
 		)
 		self.profile.save(ignore_permissions=True)
 		self._ensure_item_price()
-		make_stock_entry(target=WAREHOUSE, item_code=self.item, qty=10, basic_rate=100)
+		# ERPNext's own bootstrap ships `_Test Item` with `allow_negative_stock = 1`,
+		# which makes `is_negative_stock_allowed` return True and disables the oversell
+		# guard this class exists to prove. Turn it off for the duration and restore it
+		# in tearDown; the change is committed because the concurrency test reads it
+		# from separate connections.
+		self._saved_item_neg_stock = frappe.db.get_value("Item", self.item, "allow_negative_stock")
+		self._set_item_negative_stock(0)
+		# POS availability is Bin.actual_qty minus what unconsolidated POS Invoices
+		# reserve, so on a shared site it drifts below zero; top up to a known
+		# sellable quantity instead of seeding a fixed one.
+		ensure_pos_availability(self.item, WAREHOUSE, 10)
 		frappe.set_user(self.cashier)
 		self.assertTrue(frappe.has_permission("POS Invoice", ptype="create"))
 		self.assertTrue(frappe.has_permission("POS Invoice", ptype="submit"))
@@ -92,8 +104,14 @@ class TestSaleSubmit(IntegrationTestCase):
 	def tearDown(self) -> None:
 		frappe.set_user("Administrator")
 		close_test_openings(self.cashier)
+		self._set_item_negative_stock(self._saved_item_neg_stock or 0)
 		frappe.db.set_single_value("POS Settings", "invoice_type", self.saved_pos_mode or "POS Invoice")
 		super().tearDown()
+
+	def _set_item_negative_stock(self, value) -> None:
+		frappe.db.set_value("Item", self.item, "allow_negative_stock", value, update_modified=False)
+		frappe.clear_document_cache("Item", self.item)
+		frappe.db.commit()
 
 	def test_sale_parser_accepts_normal_item_and_payment_lists(self):
 		payload = sales_api._parse_sale_payload(self._payload())
@@ -199,7 +217,7 @@ class TestSaleSubmit(IntegrationTestCase):
 		self.assertEqual(result["error"]["details"]["field"], "rate")
 
 	def test_no_open_session_returns_error(self):
-		frappe.db.delete("POS Opening Entry", {"name": self.opening})
+		frappe.db.set_value("POS Opening Entry", self.opening, "status", "Closed")
 		with patch("frappe.get_request_header", return_value=str(uuid4())):
 			result = self._endpoint(self._payload())
 		self.assertFalse(result["ok"])

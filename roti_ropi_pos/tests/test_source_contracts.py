@@ -412,6 +412,58 @@ class TestNoPrivateSellingImports(IntegrationTestCase):
 		)
 
 
+class TestNoERPNextTestModuleImports(IntegrationTestCase):
+	"""Roti tests must not import an ERPNext *test* module.
+
+	``erpnext.tests.utils`` instantiates ``BootStrapTestData()`` at module scope, and
+	its price-list bootstrap treats the hardcoded ``"INR"`` as part of the existence
+	check. On a site whose ``Standard Buying`` / ``Standard Selling`` carry any other
+	currency the check misses and the insert collides, so importing any ERPNext test
+	module (directly or transitively — every one of them imports ``ERPNextTestSuite``)
+	kills test *discovery* with ``DuplicateEntryError: ('Price List', 'Standard
+	Buying', ...)`` before one test runs. Own the fixture helper instead; see
+	``roti_ropi_pos.tests.helpers.set_default_account_for_mode_of_payment``.
+
+	Frappe's own test modules are not covered here: they carry no import-time fixture
+	bootstrap (``frappe.tests.utils.generators._try_create`` guards on
+	``frappe.db.exists``, so it is currency-safe), and this contract is a guard against
+	the measured failure, not a general style rule.
+	"""
+
+	def test_no_erpnext_test_module_imports(self):
+		app_path = Path(frappe.get_app_path("roti_ropi_pos"))
+
+		def is_erpnext_test_module(module: str) -> bool:
+			if module != "erpnext" and not module.startswith("erpnext."):
+				return False
+			return any(part == "tests" or part.startswith("test_") for part in module.split("."))
+
+		offenders = []
+		for source_path in app_path.rglob("*.py"):
+			if "__pycache__" in source_path.parts:
+				continue
+			tree = ast.parse(source_path.read_text())
+			relative = source_path.relative_to(app_path)
+			for node in ast.walk(tree):
+				if isinstance(node, ast.Import):
+					for alias in node.names:
+						if is_erpnext_test_module(alias.name):
+							offenders.append(f"{relative}: import {alias.name}")
+				elif isinstance(node, ast.ImportFrom):
+					module = node.module or ""
+					if is_erpnext_test_module(module):
+						names = ", ".join(alias.name for alias in node.names)
+						offenders.append(f"{relative}: from {module} import {names}")
+		self.assertEqual(
+			offenders,
+			[],
+			"SOURCE CONTRACT: importing an ERPNext test module drags in erpnext.tests.utils, "
+			"whose import-time BootStrapTestData() breaks test discovery on any site whose "
+			"price lists are not INR — own the fixture helper in roti_ropi_pos.tests.helpers "
+			"instead",
+		)
+
+
 class TestRequiredDocTypeFields(IntegrationTestCase):
 	"""Custom fields our services read/write must exist on installed DocTypes."""
 
