@@ -228,14 +228,14 @@ class TestAuthentication(IntegrationTestCase):
 				validate_mobile_api_scope()
 
 	def test_cashier_cannot_use_generic_v2_or_encoded_alternate_routes(self):
-		for path in (
-			"/api/method/frappe.client.get",
-			"/api/resource/POS Invoice",
-			"/api/v2/method/roti_ropi_pos.api.v1.bootstrap.get",
-			"/api/method/roti_ropi_pos.api.v1.bootstrap%2Eget",
+		for path, error in (
+			("/api/method/frappe.client.get", frappe.PermissionError),
+			("/api/resource/POS Invoice", frappe.PermissionError),
+			("/api/v2/method/roti_ropi_pos.api.v1.bootstrap.get", frappe.AuthenticationError),
+			("/api/method/roti_ropi_pos.api.v1.bootstrap%2Eget", frappe.AuthenticationError),
 		):
 			with self.subTest(path=path), self._request(path=path):
-				with self.assertRaises(frappe.PermissionError):
+				with self.assertRaises(error):
 					validate_mobile_api_scope()
 
 	def test_legacy_cmd_rejected_except_exact_login_submission(self):
@@ -302,7 +302,7 @@ class TestAuthentication(IntegrationTestCase):
 			with self.assertRaises(frappe.AuthenticationError):
 				validate_mobile_oauth_request(path, "Guest")
 
-	def test_trailing_slash_is_not_an_exact_mobile_api_path(self):
+	def test_trailing_slash_alias_is_denied_after_matching_bearer(self):
 		with self._request(path=f"{BOOTSTRAP_PATH}/", authorization=f"Bearer {TOKEN}"):
 			with self.assertRaises(frappe.PermissionError):
 				validate_mobile_api_scope()
@@ -383,6 +383,91 @@ class TestAuthentication(IntegrationTestCase):
 		with self._request(user=desk_user, authorization=""):
 			with self.assertRaises(frappe.AuthenticationError):
 				validate_mobile_api_scope()
+
+	def test_desk_cashier_route_aliases_require_mobile_bearer(self):
+		desk_user = self._promote_cashier_to_desk_account()
+		method = "roti_ropi_pos.api.v1.bootstrap.get"
+		for path in (
+			f"/api/v1/method/{method}",
+			f"/api/v2/method/{method}",
+			f"/api/method/{method}/ignored-suffix",
+			f"/api/v1/method/{method}/ignored-suffix",
+			f"/api/v2/method/{method}/",
+		):
+			with self.subTest(path=path), self._request(path=path, user=desk_user):
+				with self.assertRaises(frappe.AuthenticationError):
+					validate_mobile_api_scope()
+
+	def test_desk_cashier_legacy_command_requires_mobile_bearer(self):
+		desk_user = self._promote_cashier_to_desk_account()
+		with self._request(
+			path="/api/method/frappe.ping",
+			user=desk_user,
+			form={"cmd": "roti_ropi_pos.api.v1.bootstrap.get"},
+		):
+			with self.assertRaises(frappe.AuthenticationError):
+				validate_mobile_api_scope()
+
+	def test_desk_cashier_route_aliases_remain_denied_after_matching_mobile_bearer(self):
+		desk_user = self._promote_cashier_to_desk_account()
+		method = "roti_ropi_pos.api.v1.bootstrap.get"
+		for path, form in (
+			(f"/api/v1/method/{method}", {}),
+			(f"/api/v2/method/{method}", {}),
+			(f"/api/method/{method}/ignored-suffix", {}),
+			(f"/api/v1/method/{method}/ignored-suffix", {}),
+			(f"/api/v2/method/{method}/", {}),
+			("/api/method/frappe.ping", {"cmd": method}),
+		):
+			with (
+				self.subTest(path=path),
+				self._request(
+					path=path,
+					user=desk_user,
+					form=form,
+					authorization=f"Bearer {TOKEN}",
+				),
+			):
+				with self.assertRaises(frappe.PermissionError):
+					validate_mobile_api_scope()
+
+	def test_v2_doctype_method_shape_cannot_reach_a_mobile_pos_callable(self):
+		"""`/api/v2/method/<doctype>/<method>` is fail-closed at dispatch.
+
+		`frappe.api.v2.handle_rpc_call` feeds the first segment to
+		`load_doctype_module()`, so this shape can never resolve to a Mobile POS
+		callable. The gate leaves it to the scope fence; assert the fence still holds.
+		"""
+		method = "roti_ropi_pos.api.v1.bootstrap.get"
+		with self._request(path=f"/api/v2/method/{method}/get", user=self.cashier):
+			with self.assertRaises(frappe.PermissionError):
+				validate_mobile_api_scope()
+
+	def test_overridden_mobile_pos_method_still_requires_mobile_bearer(self):
+		"""An `override_whitelisted_methods` entry must not drop the bearer gate.
+
+		`frappe.api.v2.handle_rpc_call` and `frappe.handler.execute_cmd` resolve the
+		override before dispatch, so a Mobile POS callable can dispatch under a
+		foreign identity. The gate keys on the requested identity as well, otherwise
+		installing such an override would silently open the route.
+		"""
+		with patch(
+			"frappe.override_whitelisted_method",
+			return_value="some_app.overrides.custom_bootstrap_get",
+		):
+			with self._request(user=self._promote_cashier_to_desk_account()):
+				with self.assertRaises(frappe.AuthenticationError):
+					validate_mobile_api_scope()
+
+	def test_override_target_of_a_generic_route_is_also_gated(self):
+		"""The reverse direction: a generic route resolving to a Mobile POS callable."""
+		with patch(
+			"frappe.override_whitelisted_method",
+			return_value="roti_ropi_pos.api.v1.sales.submit",
+		):
+			with self._request(path="/api/method/frappe.client.get", user=self.cashier):
+				with self.assertRaises(frappe.AuthenticationError):
+					validate_mobile_api_scope()
 
 	def test_administrator_is_never_accepted_as_a_mobile_pos_bearer_identity(self):
 		"""No Administrator bypass: the v1 gate rejects the built-in account even

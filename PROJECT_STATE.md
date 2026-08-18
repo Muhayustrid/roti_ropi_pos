@@ -1,9 +1,11 @@
 # PROJECT_STATE.md — AI session resume checkpoint
 
-**Last updated:** 2026-08-18, after final Git integration completed in all four custom apps.
-**Resume point:** Project complete. Phase 3 rollout and final review passed. All intended project source
-is committed, every feature branch is published, and each expected history is integrated into
-`origin/main` without force. Protected and unrelated local overlays remain deliberately uncommitted.
+**Last updated:** 2026-08-18, after P0-1 (audit finding C-1) went green and was committed.
+**Resume point:** New workstream — Mobile POS backend readiness remediation, P0 only, from
+`docs/mobile-pos/backend-readiness-audit.md`. P0-1 / C-1 is complete, reviewed, and committed. P0-2
+(idempotency contention, I-5 / I-6) is the next boundary. See §11.
+
+The app-ownership extraction project (Phases 0-3) is complete; its record below stays as history.
 
 This file is the current-state save game, not a history. Git, tests, and the live site override it.
 If it conflicts with verified evidence, fix this file.
@@ -415,3 +417,89 @@ No migrate, deploy, restart, or business-data mutation ran during final Git inte
 PHASE 3 COMPLETE — MAIN-SITE ROLLOUT VERIFIED AND REVIEW PASSED
 
 PROJECT COMPLETE — ALL INTENDED CHANGES COMMITTED, PUSHED, AND MERGED TO MAIN
+
+---
+
+## 11. Active workstream — Mobile POS backend P0 remediation
+
+**Source of findings:** `docs/mobile-pos/backend-readiness-audit.md` (§ Critical, § Important, §7 plan).
+Scope is P0 only. P1/P2 findings, core Frappe/ERPNext files, `development.localhost`,
+`rotiropi-fresh.localhost`, and IMIN hardware work are all out of scope.
+
+**Test site:** `mobile-pos-regression.localhost` (dedicated; created for this workstream). Bench root
+`/workspace/development/frappe-bench` in `frappe_docker_devcontainer-frappe-1`. Installed apps there:
+`frappe`, `erpnext`, `bakery_manufacturing`, `roti_ropi_pos` only.
+
+**Order (one finding per boundary, RED → minimal fix → GREEN → mutation → diff review → checkpoint):**
+
+| # | Finding | Status |
+|---|---|---|
+| P0-1 | C-1 route-alias auth bypass | **Complete — green, reviewed, committed** |
+| P0-2 | I-5 / I-6 idempotency contention and stable error behaviour | Not started |
+| P0-3 | I-2 Administrator elevation in closing | Not started |
+| P0-4 | I-1 closing transaction / savepoint boundary | Not started |
+| P0-5 | I-3 lost-key closing recovery | Not started |
+| P0-6 | I-4 ERPNext sale/return error mapping | Not started |
+| P0-7 | I-16 money-path evidence restoration | Not started |
+
+### P0-1 / C-1 — complete
+
+Root cause, measured against installed Frappe 16.27.1 rather than inferred: `validate_mobile_api_scope`
+compared only the raw `frappe.request.path` against a literal `/api/method/...` allowlist. Frappe mounts
+the v1 rules under both `/api` and `/api/v1` with `strict_slashes=False`, truncates the v1 method at the
+first `/` (`frappe/api/v1.py`), and also serves `/api/v2/method/<method>`; legacy `cmd` dispatch bypasses
+the path entirely. The mobile-only fence (`_is_mobile_only_account`) exempts any account with Desk
+access, which the Setup Wizard grants to the first System User along with every other role. A Desk
+account holding `Mobile POS Cashier` could therefore call all 16 Mobile POS callables with no
+client-bound Bearer token.
+
+Fix, in `roti_ropi_pos/mobile_pos/auth_hook.py`:
+
+- Authority is now the resolved dispatch identity, not the path. `MOBILE_POS_METHODS` holds the 16
+  canonical method strings; `MOBILE_POS_PATHS` is derived from it, so the two cannot drift.
+- `_dispatch_identities()` binds `frappe.api.API_URL_MAP` to `frappe.request.environ`, reproduces each
+  dispatcher's own normalisation (v1 suffix truncation, v2 `<method>` without `<doctype>`, legacy `cmd`),
+  and returns both the requested identity and its `frappe.override_whitelisted_method` target. Returning
+  both closes the fail-open in either override direction.
+- Any request whose identities intersect `MOBILE_POS_METHODS` runs `_validate_mobile_bearer` first
+  (client, user, status, expiry, enabled, explicit `Has Role` row, `STANDARD_USERS` excluded), and only
+  then the exact-route/no-`cmd` policy from `AGENTS.md`. Aliases therefore authenticate first and are
+  still refused as alternate dispatch — `AuthenticationError` without a valid token, `PermissionError`
+  with one.
+
+Test changes: `roti_ropi_pos/tests/test_authentication.py` gained the alias/legacy-`cmd` groups, the
+override fail-open pair, and the `/api/v2/method/<doctype>/<method>` fail-closed case; two pre-existing
+alias tests changed expected exception class because the bearer gate now runs first.
+`roti_ropi_pos/tests/helpers.py` builds a real WSGI environ for `FakeRequest` (the URL map needs one)
+and wraps the extra `make_cashier` insert in `frappe.flags.in_import`, which is core's own escape hatch
+from `throttle_user_creation` (default 60 users/hour). Both helper changes are test-only.
+
+Evidence (all fresh, `mobile-pos-regression.localhost`):
+
+- RED before the fix: 5 subtest failures on the alias group plus 1 on the legacy-`cmd` test,
+  "AuthenticationError not raised".
+- RED for the override fail-open test before widening `_dispatch_identities`: 1 failure, same message.
+- GREEN: `Ran 36 tests in 18.399s OK`, exit 0.
+- Mutation A — return only the override target: `test_overridden_mobile_pos_method_still_requires_mobile_bearer` fails.
+- Mutation B — return only the requested identity: `test_override_target_of_a_generic_route_is_also_gated` errors.
+  Both restored, suite green again.
+- Adjacent modules unaffected: `test_api_foundation` 14 OK, `test_bootstrap` 9 OK, `test_sessions` 10 OK.
+- Ruff 0.14.10 `check` all passed; `format --check` 3 files already formatted; `git diff --check` clean.
+- Independent reviewer (read-only worktree): Critical 0, Important 0. It confirmed the environ read is
+  safe at `validate_auth_via_hooks` time and that `except HTTPException` is the correct width.
+
+Pre-existing, unrelated to this diff: `test_source_contracts` (2) and `test_catalog` (1) fail on this
+site because `selling_additional` and `stock_additional` are not installed here, so the past-order and
+barcode-scanner overrides resolve to the ERPNext originals. Both pass on `development.localhost`, which
+has those apps. Do not "fix" these on the regression site.
+
+Committed for this boundary in `fix: gate Mobile POS aliases by resolved dispatch identity`:
+`roti_ropi_pos/mobile_pos/auth_hook.py`, `roti_ropi_pos/tests/test_authentication.py`,
+`roti_ropi_pos/tests/helpers.py`, and this file. No migrate ran. `test_sales.py` and the
+extraction-design status line remain the pre-existing local edits described in §8.
+
+**Next action:** P0-2 — I-5 / I-6 idempotency contention and stable retry behaviour. Guardrails for that
+boundary: `REQUEST_IN_PROGRESS` only for proven same-key contention; rolled-back winner, deadlock, and
+lock timeout each need a deterministic retry contract; unknown DB failure stays a server/internal
+failure; `IDEMPOTENCY_INVARIANT` only for contractually impossible state; no sale/closing semantics
+change beyond what P0-2 requires.

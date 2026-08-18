@@ -4,27 +4,32 @@ import base64
 import binascii
 
 import frappe
+import frappe.api.v1
+import frappe.api.v2
+from werkzeug.exceptions import HTTPException
 
 CASHIER_ROLE = "Mobile POS Cashier"
 
-MOBILE_POS_PATHS = {
-	"/api/method/roti_ropi_pos.api.v1.bootstrap.get",
-	"/api/method/roti_ropi_pos.api.v1.sessions.current",
-	"/api/method/roti_ropi_pos.api.v1.sessions.open",
-	"/api/method/roti_ropi_pos.api.v1.customers.search",
-	"/api/method/roti_ropi_pos.api.v1.catalog.search",
-	"/api/method/roti_ropi_pos.api.v1.catalog.scan",
-	"/api/method/roti_ropi_pos.api.v1.catalog.quote_item",
-	"/api/method/roti_ropi_pos.api.v1.sales.submit",
-	"/api/method/roti_ropi_pos.api.v1.sales.quote_cart",
-	"/api/method/roti_ropi_pos.api.v1.sales.quote_return",
-	"/api/method/roti_ropi_pos.api.v1.sales.list",
-	"/api/method/roti_ropi_pos.api.v1.sales.get",
-	"/api/method/roti_ropi_pos.api.v1.sales.create_return",
-	"/api/method/roti_ropi_pos.api.v1.closing.preview",
-	"/api/method/roti_ropi_pos.api.v1.closing.submit",
-	"/api/method/roti_ropi_pos.api.v1.closing.status",
+MOBILE_POS_METHODS = {
+	"roti_ropi_pos.api.v1.bootstrap.get",
+	"roti_ropi_pos.api.v1.sessions.current",
+	"roti_ropi_pos.api.v1.sessions.open",
+	"roti_ropi_pos.api.v1.customers.search",
+	"roti_ropi_pos.api.v1.catalog.search",
+	"roti_ropi_pos.api.v1.catalog.scan",
+	"roti_ropi_pos.api.v1.catalog.quote_item",
+	"roti_ropi_pos.api.v1.sales.submit",
+	"roti_ropi_pos.api.v1.sales.quote_cart",
+	"roti_ropi_pos.api.v1.sales.quote_return",
+	"roti_ropi_pos.api.v1.sales.list",
+	"roti_ropi_pos.api.v1.sales.get",
+	"roti_ropi_pos.api.v1.sales.create_return",
+	"roti_ropi_pos.api.v1.closing.preview",
+	"roti_ropi_pos.api.v1.closing.submit",
+	"roti_ropi_pos.api.v1.closing.status",
 }
+
+MOBILE_POS_PATHS = {f"/api/method/{method}" for method in MOBILE_POS_METHODS}
 
 MOBILE_POS_BROWSER_PATHS = {
 	"/api/method/login",
@@ -115,30 +120,62 @@ def validate_mobile_api_scope() -> None:
 	"""Restrict Mobile POS OAuth and cashier requests before endpoint dispatch."""
 	path = frappe.request.path
 	user = frappe.session.user
-	validate_mobile_oauth_request(path, user)
 
-	if path in MOBILE_POS_PATHS:
-		auth_type, separator, access_token = frappe.get_request_header("Authorization", "").partition(" ")
-		if auth_type.lower() != "bearer" or not separator or not access_token:
-			raise frappe.AuthenticationError("OAuth bearer authentication is required.")
-		token = frappe.db.get_value(
-			"OAuth Bearer Token",
-			{"access_token": access_token},
-			["client", "user", "status", "expiration_time"],
-			as_dict=True,
-		)
-		if (
-			not token
-			or token.client != frappe.conf.get("mobile_pos_oauth_client_id")
-			or token.user != user
-			or token.status != "Active"
-			or not token.expiration_time
-			or frappe.utils.now_datetime() >= token.expiration_time
-			or not frappe.db.get_value("User", user, "enabled")
-			or not _has_cashier_role(user)
-		):
-			raise frappe.AuthenticationError("The Mobile POS bearer token is not authorized.")
+	if MOBILE_POS_METHODS & _dispatch_identities():
+		_validate_mobile_bearer(user)
+		if frappe.form_dict.get("cmd") or path not in MOBILE_POS_PATHS:
+			raise frappe.PermissionError("Alternate Mobile POS dispatch is not allowed.")
 		return
 
+	validate_mobile_oauth_request(path, user)
 	if _is_mobile_only_account(user) and path not in MOBILE_POS_BROWSER_PATHS:
 		raise frappe.PermissionError("This account may access only the Mobile POS API.")
+
+
+def _dispatch_identities() -> set[str]:
+	"""Return every method identity this request can dispatch to.
+
+	Both the requested identity and the `override_whitelisted_methods` target are
+	returned, because either being a Mobile POS callable is enough to require the
+	bearer gate: an override redirects a Mobile POS route away from its own module,
+	and it can equally redirect a generic route into one.
+	"""
+	if command := frappe.form_dict.get("cmd"):
+		requested = command
+	else:
+		try:
+			endpoint, arguments = frappe.api.API_URL_MAP.bind_to_environ(frappe.request.environ).match()
+		except HTTPException:
+			return set()
+
+		if endpoint is frappe.api.v1.handle_rpc_call:
+			requested = arguments["method"].split("/")[0]
+		elif endpoint is frappe.api.v2.handle_rpc_call and not arguments.get("doctype"):
+			requested = arguments["method"]
+		else:
+			return set()
+
+	return {requested, frappe.override_whitelisted_method(requested)}
+
+
+def _validate_mobile_bearer(user: str) -> None:
+	auth_type, separator, access_token = frappe.get_request_header("Authorization", "").partition(" ")
+	if auth_type.lower() != "bearer" or not separator or not access_token:
+		raise frappe.AuthenticationError("OAuth bearer authentication is required.")
+	token = frappe.db.get_value(
+		"OAuth Bearer Token",
+		{"access_token": access_token},
+		["client", "user", "status", "expiration_time"],
+		as_dict=True,
+	)
+	if (
+		not token
+		or token.client != frappe.conf.get("mobile_pos_oauth_client_id")
+		or token.user != user
+		or token.status != "Active"
+		or not token.expiration_time
+		or frappe.utils.now_datetime() >= token.expiration_time
+		or not frappe.db.get_value("User", user, "enabled")
+		or not _has_cashier_role(user)
+	):
+		raise frappe.AuthenticationError("The Mobile POS bearer token is not authorized.")

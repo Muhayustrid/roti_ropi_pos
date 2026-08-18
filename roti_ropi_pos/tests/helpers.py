@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import frappe
+from werkzeug.test import EnvironBuilder
 
 CASHIER_ROLE = "Mobile POS Cashier"
 DESK_ROLE = "Sales User"
@@ -22,7 +23,12 @@ def make_cashier(email: str) -> str:
 	)
 	user.flags.ignore_validate = True
 	user.flags.ignore_links = True
-	user.insert(ignore_permissions=True)
+	previous_import_flag = frappe.flags.in_import
+	frappe.flags.in_import = True
+	try:
+		user.insert(ignore_permissions=True)
+	finally:
+		frappe.flags.in_import = previous_import_flag
 	frappe.cache.hdel("roles", email)
 	return email
 
@@ -175,6 +181,7 @@ class FakeRequest:
 		self.path = path
 		self.method = method
 		self.headers = headers or {}
+		self.environ = EnvironBuilder(path=path, method=method, headers=self.headers).get_environ()
 
 
 def set_request(path: str, method: str = "GET", headers: dict | None = None) -> None:
