@@ -392,9 +392,9 @@ Final project commits:
 | `roti_ropi_pos` | `a99b0fc6963d75f0730432c33393a6506ead128a` | `a210a0cc3eb178ee12a2982002abbacc2960c3b4` | Normal merge |
 
 Every feature branch was pushed without force. Fresh remote checks prove each expected project commit is
-an ancestor of `origin/main`. No merge conflict occurred. The final Roti closeout documentation commit
-advances `origin/main` once after this file is written. Its hash is recorded in the Phase 3 ledger and
-final report instead of creating a self-referential commit loop.
+an ancestor of `origin/main`. No merge conflict occurred. The final Roti closeout documentation history
+advances `origin/main` after this file is written. Its final merge hash is reported externally instead
+of creating a self-referential commit loop.
 
 The final focused Selling gate used Ruff 0.14.10. Migration ran 14 tests OK. Preflight initially exposed
 three test-only failures caused by a removed site-global POS Profile fixture. The tests now construct the
