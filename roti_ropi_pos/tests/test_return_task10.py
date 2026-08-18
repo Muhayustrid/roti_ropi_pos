@@ -509,6 +509,60 @@ class TestTask10ReturnContract(IntegrationTestCase):
 		self.assertEqual(frappe.db.count("POS Invoice", {"custom_mobile_pos_transaction_id": key}), 0)
 		self.assertEqual(frappe.db.count("Mobile POS Request", {"idempotency_key": key}), 0)
 
+	def test_return_maps_erpnext_domain_rejection(self):
+		"""The return path maps a real ERPNext rejection like the sale path does.
+
+		``_Test UOM`` has ``must_be_whole_number = 1`` and the return parser
+		accepts a fractional qty below the remaining quantity, so ERPNext's own
+		``validate_uom_is_integer`` is the first code to reject the return.
+		"""
+		sale = self._submit(qty="2", total="200")
+		key = str(uuid4())
+		frappe.local.form_dict = frappe._dict(
+			{
+				"source_name": sale["summary"]["name"],
+				"reason": "Damaged",
+				"items": [{"source_item_row": sale["items"][0]["row_id"], "qty": "0.5"}],
+			}
+		)
+
+		with patch("frappe.get_request_header", return_value=key):
+			result = sales_api.create_return()
+
+		self.assertFalse(result["ok"], msg=str(result))
+		self.assertEqual(result["error"]["code"], "DOCUMENT_VALIDATION_FAILED")
+		self.assertEqual(result["error"]["details"]["doctype"], "POS Invoice")
+		self.assertEqual(result["error"]["details"]["exception"], "UOMMustBeIntegerError")
+		self.assertFalse(result["error"]["retryable"])
+		self.assertNotIn("<", result["error"]["details"]["display_message"])
+		self.assertEqual(frappe.db.count("POS Invoice", {"custom_mobile_pos_transaction_id": key}), 0)
+		self.assertEqual(frappe.db.count("Mobile POS Request", {"idempotency_key": key}), 0)
+
+	def test_return_keeps_internal_validation_errors_unmapped(self):
+		"""A framework validation subclass stays a server failure on returns too."""
+		sale = self._submit(qty="1", total="100")
+		key = str(uuid4())
+		frappe.local.form_dict = frappe._dict(
+			{
+				"source_name": sale["summary"]["name"],
+				"reason": "Damaged",
+				"items": [{"source_item_row": sale["items"][0]["row_id"], "qty": "1"}],
+			}
+		)
+
+		with (
+			patch("frappe.get_request_header", return_value=key),
+			patch(
+				"roti_ropi_pos.overrides.pos_invoice.MobilePOSInvoice.submit",
+				side_effect=frappe.TimestampMismatchError("stale"),
+			),
+			self.assertRaises(frappe.TimestampMismatchError),
+		):
+			sales_api.create_return()
+
+		self.assertEqual(frappe.db.count("POS Invoice", {"custom_mobile_pos_transaction_id": key}), 0)
+		self.assertEqual(frappe.db.count("Mobile POS Request", {"idempotency_key": key}), 0)
+
 	def test_distinct_keys_cannot_concurrently_over_return(self):
 		self.assertEqual(
 			frappe.db.sql("SELECT @@transaction_isolation")[0][0].upper(),

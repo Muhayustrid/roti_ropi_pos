@@ -6,6 +6,8 @@ import frappe
 from erpnext.accounts.doctype.pos_invoice.pos_invoice import get_stock_availability
 from erpnext.stock.get_item_details import get_conversion_factor
 from erpnext.stock.serial_batch_bundle import get_batches_from_bundle, get_serial_nos_from_bundle
+from erpnext.utilities.transaction_base import UOMMustBeIntegerError
+from frappe.utils import strip_html_tags
 
 from roti_ropi_pos.mobile_pos.authorization import (
 	get_authorized_profile,
@@ -21,6 +23,49 @@ from roti_ropi_pos.mobile_pos.validation import (
 	return_quantity_policy,
 	sale_payment_amount_policy,
 )
+
+# ERPNext's own domain rejection classes for a POS Invoice: a deterministic
+# business rejection the cashier can act on, declared by ERPNext itself, so
+# catching the class needs no message parsing. ``UOMMustBeIntegerError`` is the
+# one such class that is reachable through this API: the payload parser accepts
+# a fractional qty, and only ERPNext knows which UOMs are whole-number.
+#
+# ``ProductBundleStockValidationError``, the module's only other declared class,
+# is deliberately absent. ``_validate_total_stock`` expands bundle components
+# and compares the same availability ERPNext compares, so a bundle shortage is
+# already rejected as ``INSUFFICIENT_STOCK`` before insert; a mapping here would
+# be unreachable code.
+#
+# A bare ``frappe.ValidationError`` is deliberately absent too: ERPNext and the
+# framework raise it for rules this app has already enforced *and* for a
+# document this app built incorrectly. The two are indistinguishable, so
+# mapping it would turn a server defect into a cashier-facing domain code.
+# Unmapped exceptions keep reaching Frappe's request-ID logging and HTTP 500.
+_ERPNEXT_DOMAIN_REJECTIONS = (UOMMustBeIntegerError,)
+
+
+def _persist_invoice(invoice) -> None:
+	"""Insert and submit one POS Invoice, mapping verified ERPNext rejections.
+
+	Sale and return share this call so both directions return the same stable
+	code for the same ERPNext rejection.
+	"""
+	try:
+		invoice.insert()
+		invoice.submit()
+	except _ERPNEXT_DOMAIN_REJECTIONS as error:
+		raise MobilePOSAPIError(
+			"DOCUMENT_VALIDATION_FAILED",
+			"ERPNext rejected this document.",
+			status=422,
+			details={
+				"doctype": invoice.doctype,
+				"exception": error.__class__.__name__,
+				# Display-only text for the cashier. Android routes on ``code``
+				# and ``exception``; it never parses this string.
+				"display_message": strip_html_tags(str(error)),
+			},
+		) from error
 
 
 def submit_sale(payload: dict, transaction_id: str) -> MutationResult:
@@ -64,8 +109,7 @@ def submit_sale(payload: dict, transaction_id: str) -> MutationResult:
 	invoice.set_outstanding_amount()
 	verify_exact_settlement(invoice, [Decimal(str(row["amount"])) for row in payload["payments"]])
 	_verify_fully_settled(invoice)
-	invoice.insert()
-	invoice.submit()
+	_persist_invoice(invoice)
 	return MutationResult(
 		data={"sale": sale_detail(invoice)},
 		reference_doctype="POS Invoice",
@@ -548,8 +592,7 @@ def create_return(payload: dict, transaction_id: str) -> MutationResult:
 	return_invoice.set_outstanding_amount()
 	if Decimal(str(return_invoice.paid_amount)) != payable:
 		raise _invalid_payment(None, "Return payments must exactly settle the return.")
-	return_invoice.insert()
-	return_invoice.submit()
+	_persist_invoice(return_invoice)
 	return MutationResult(
 		data={"return_sale": sale_detail(return_invoice, return_reason=payload["reason"])},
 		reference_doctype="POS Invoice",

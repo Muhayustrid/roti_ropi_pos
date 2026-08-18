@@ -110,6 +110,7 @@
 | 422 | `INVALID_PAYMENT` | Payment rows violate profile/invoice rules | No |
 | 422 | `RETURN_LIMIT_EXCEEDED` | Requested return exceeds source sale | No |
 | 422 | `PROFILE_CONFIGURATION_INVALID` | Assigned POS Profile configuration cannot satisfy the requested operation | No |
+| 422 | `DOCUMENT_VALIDATION_FAILED` | ERPNext rejected the document with one of its own declared domain rejection classes | No |
 | 503 | `TEMPORARILY_UNAVAILABLE` | Dependency or worker unavailable, or a concurrent request holding this idempotency key did not complete | Yes |
 
 ### Error Detail Schemas
@@ -136,6 +137,7 @@
 | `INVALID_PAYMENT` | `mode_of_payment: string or null`, `reason: string`; invalid return modes also include `allowed_refund_modes: string[]` |
 | `RETURN_LIMIT_EXCEEDED` | `source_name: string`, `source_item_row: string`, `requested_qty: decimal string`, `remaining_qty: decimal string`, `refresh_endpoint: "v1.sales.get"` |
 | `PROFILE_CONFIGURATION_INVALID` | `pos_profile: string`, `field: string`, `reason: string` |
+| `DOCUMENT_VALIDATION_FAILED` | `doctype: string`, `exception: string`, `display_message: string` |
 | `TEMPORARILY_UNAVAILABLE` | `retry_after_seconds: integer`; idempotency contention also includes `endpoint: string` |
 
 - **Proposed**: `details` is always an object. Clients ignore additive unknown fields but may rely on the required fields above.
@@ -653,6 +655,14 @@
   "empty_payments_amount"`; malformed, negative, and excessive-scale request
   values return `INVALID_REQUEST`. The response `details` always carries a
   structured `reason` field.
+- **Approved**: An ERPNext domain rejection raised while the POS Invoice is
+  inserted or submitted returns `DOCUMENT_VALIDATION_FAILED` with HTTP 422,
+  `retryable: false`, and creates no POS Invoice and no Mobile POS Request. Only
+  ERPNext's own declared rejection classes are mapped; `details.exception`
+  carries the class name Android routes on, and `details.display_message`
+  carries HTML-stripped text for display only. Android must never parse
+  `display_message` or an ERPNext traceback. Any other exception remains a
+  native server failure with only a request identifier.
 - **Proposed**: Returns `{ "sale": SaleDetail }`; first execution sets HTTP 201 and replay sets HTTP 200.
 
 ### `GET sales.get`
@@ -725,6 +735,10 @@
 - **Approved**: Preserve existing remarks and insert exactly one newline before the appended content when existing remarks are non-empty.
 - **Approved**: Return `{ "return_sale": SaleDetail }` with `return_against`, `return_reason`, receipt totals, taxes, items, bundle-aware `batch_numbers`/`serial_numbers`, `refund_amount`, and persisted `refund_allocations`; first execution sets HTTP 201 and replay sets HTTP 200.
 - **Approved**: Replay requires the same UUID and identical normalized request, including conditional `refund_mode`, and returns the same POS Invoice reference. A different body with the same UUID returns `IDEMPOTENCY_KEY_REUSED`.
+- **Approved**: The return path maps ERPNext domain rejections exactly as
+  `sales.submit` does: the same `DOCUMENT_VALIDATION_FAILED` code, HTTP 422,
+  `details` schema, and unmapped-exception rule. Sale and return never disagree
+  about the code for the same ERPNext rejection.
 
 Return quantity uses `return-quantity/v1`: an ASCII decimal-dot string, positive and non-zero, scale `0..min(max(float_precision, 0), 9)`, minimum one unit at that scale, maximum 12 integer digits plus that scale, and exact `Decimal` comparison. Leading/trailing whitespace, grouping, sign characters, exponent notation, malformed values, excessive scale, overflow, rounding, and truncation are rejected. Android sends no refund amount, so there is no return-refund input decimal policy.
 

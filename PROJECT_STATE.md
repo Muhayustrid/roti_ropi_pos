@@ -1,9 +1,10 @@
 # PROJECT_STATE.md — AI session resume checkpoint
 
-**Last updated:** 2026-08-19, after P0-5 (audit finding I-3) went green and was committed.
+**Last updated:** 2026-08-19, after P0-6 (audit finding I-4) went green and was committed.
 **Resume point:** Mobile POS backend readiness remediation, P0 only, from
-`docs/mobile-pos/backend-readiness-audit.md`. P0-1 through P0-5 are complete, mutation-verified, and
-committed. P0-6 (ERPNext sale/return error mapping, I-4) is the next boundary. See §11.
+`docs/mobile-pos/backend-readiness-audit.md`. P0-1 through P0-6 are complete, mutation-verified, and
+committed. P0-7 (I-16 money-path evidence restoration on a site holding all four apps) is the next
+boundary. See §11.
 
 The app-ownership extraction project (Phases 0-3) is complete; its record below stays as history.
 
@@ -439,7 +440,7 @@ Scope is P0 only. P1/P2 findings, core Frappe/ERPNext files, `development.localh
 | P0-3 | I-2 Administrator elevation in closing | **Complete — green, mutation-verified, committed** |
 | P0-4 | I-1 closing transaction / savepoint boundary | **Complete — green, mutation-verified, committed** |
 | P0-5 | I-3 lost-key closing recovery | **Complete — green, mutation-verified, committed** |
-| P0-6 | I-4 ERPNext sale/return error mapping | Not started |
+| P0-6 | I-4 ERPNext sale/return error mapping | **Complete — green, mutation-verified, committed** |
 | P0-7 | I-16 money-path evidence restoration | Not started |
 
 ### P0-1 / C-1 — complete
@@ -498,9 +499,10 @@ Committed for this boundary in `fix: gate Mobile POS aliases by resolved dispatc
 `roti_ropi_pos/tests/helpers.py`, and this file. No migrate ran. `test_sales.py` and the
 extraction-design status line remain the pre-existing local edits described in §8.
 
-**Next action:** P0-3, P0-4, and P0-5 were completed in later sessions (see their sections below). The
-next boundary is P0-6 — I-4, mapping expected ERPNext sale and return validation failures into the stable
-v1 error envelope.
+**Next action:** P0-3, P0-4, P0-5, and P0-6 were completed in later sessions (see their sections below).
+The next boundary is P0-7 — I-16, restoring money-path evidence on a site that holds all four apps
+(`stock_additional`, `selling_additional`, `bakery_manufacturing`, `roti_ropi_pos`). A missing-app failure
+is not acceptable as final evidence, and fixture baselines may be corrected in test code only.
 
 ### P0-2 / I-5 + I-6 — complete
 
@@ -833,3 +835,60 @@ Committed for this boundary in `feat: recover an unresolved closing without the 
 `docs/mobile-pos/api-contract.md`, `docs/mobile-pos/backend-readiness-audit.md`, and this file. No
 migrate ran; no schema or DocType JSON changed. `test_sales.py` and the extraction-design status line
 remain the pre-existing local edits from §8.
+
+### P0-6 / I-4 — complete
+
+Root cause, reproduced live on `mobile-pos-regression.localhost` before any fix. `submit_sale` and
+`create_return` both ended with bare `insert()` / `submit()`. Every app-side rule already raised
+`MobilePOSAPIError`, but a rule only ERPNext knows escaped the envelope entirely: submitting a cart whose
+qty is fractional for a whole-number UOM returned Frappe's native HTTP 500 with the raw traceback
+`erpnext.utilities.transaction_base.UOMMustBeIntegerError: Row 1: Quantity (0.5) cannot be a fraction.`
+(`-0.5` on the return side). `_Test Item.stock_uom = "_Test UOM"` has `must_be_whole_number = 1`, and the
+payload parser accepts a fractional qty by design, so this is reachable from a normal Android request.
+
+Fix (one production file, one new shared function):
+
+- `roti_ropi_pos/mobile_pos/invoices.py`: `_persist_invoice(invoice)` wraps `insert()` + `submit()` and
+  maps a declared ERPNext rejection class to HTTP 422 `DOCUMENT_VALIDATION_FAILED` with
+  `details.doctype`, `details.exception` (the class name Android routes on), and
+  `details.display_message` (`strip_html_tags` output, display only, never parsed). `submit_sale` and
+  `create_return` both call it, so sale and return cannot disagree about the code for one rejection.
+- The mapped set is `_ERPNEXT_DOMAIN_REJECTIONS = (UOMMustBeIntegerError,)` — measured, not guessed.
+  `UOMMustBeIntegerError` (`erpnext/utilities/transaction_base.py:16`, subclass of
+  `frappe.ValidationError`) is the one declared class reachable through this API.
+  `ProductBundleStockValidationError`, the POS Invoice module's only other declared class, stays unmapped
+  because `_validate_total_stock` expands bundle components against the same availability ERPNext checks
+  and already returns `INSUFFICIENT_STOCK` before insert; a mapping would be unreachable code. A bare
+  `frappe.ValidationError` stays unmapped on purpose: ERPNext and the framework raise it both for rules
+  this app already enforces and for a document this app built incorrectly, and the two are
+  indistinguishable, so mapping it would convert a server defect into a cashier-facing domain code.
+  There is no `except Exception` anywhere on this path; unmapped exceptions still reach
+  `responses.py:api_endpoint`, its request-ID logging, and Frappe's native HTTP 500.
+
+Verification (all on `mobile-pos-regression.localhost`):
+
+- RED: both new mapping tests failed with the raw `UOMMustBeIntegerError` traceback escaping the endpoint.
+- GREEN: `test_sale_task9` `Ran 60 tests in 149.787s OK` (58 → 60), `test_return_task10`
+  `Ran 23 tests in 96.459s OK` (21 → 23).
+- Mutations, each applied then reverted:
+  - adding `frappe.ValidationError` to the mapped tuple (mapping too broad) →
+    `AssertionError: MandatoryError not raised` on the sale side and the `TimestampMismatchError`
+    equivalent on the return side;
+  - removing `UOMMustBeIntegerError` from the tuple → both mapping tests fail with the raw traceback;
+  - returning `str(error)` instead of `strip_html_tags(str(error))` →
+    `AssertionError: '<' unexpectedly found in "… disable '<strong>Must be Whole Number</strong>' …"`;
+  - reverting the return path to bare `insert()`/`submit()` (breaking sale/return symmetry) → the return
+    mapping test fails while the sale one still passes.
+- No ERPNext or Frappe file was touched, no ERPNext calculation changed, and no schema or DocType JSON
+  changed. The server remains authoritative for price, tax, grand total, payable, and refund amount.
+- Neighbouring-suite sweep, ten modules run one at a time on `mobile-pos-regression.localhost`:
+  `test_sale_task9` 60 OK, `test_return_task10` 23 OK, `test_closing` 67 OK, `test_authentication` 36 OK,
+  `test_sessions` 10 OK, `test_bootstrap` 9 OK, `test_idempotency` 32 OK, `test_api_foundation` 17 OK,
+  `test_opening_amounts` 21 OK, `test_catalog` 19 run / 1 failure. The single failure is
+  `test_effective_scanner_is_stock_override`:
+  `AssertionError: 'erpnext.stock.utils.scan_barcode' != 'stock_additional.overrides.barcode_scanner.custom_scan_barcode'`.
+  It is a missing-app baseline, not a regression: `mobile-pos-regression.localhost` has only
+  `frappe, erpnext, bakery_manufacturing, roti_ropi_pos`, so no app registers the `scan_barcode` override
+  the assertion requires. The same module is `Ran 19 tests in 0.126s OK` on `selling-cutover.localhost`,
+  which does have `stock_additional` installed. The test asserts a barcode-scanner override registration
+  and touches no part of the invoice persistence path changed by P0-6.

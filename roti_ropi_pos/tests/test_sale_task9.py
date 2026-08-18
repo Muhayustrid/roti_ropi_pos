@@ -1094,6 +1094,63 @@ class TestCashierSaleFlow(IntegrationTestCase):
 		self.assertEqual(result["error"]["details"]["reason"], "overpayment")
 		self._assert_no_persisted_artifacts(self.profile.name)
 
+	def test_cashier_submit_maps_erpnext_domain_rejection(self):
+		"""A real ERPNext validation rejection reaches Android as a stable code.
+
+		``_Test UOM`` has ``must_be_whole_number = 1``, and the payload parser
+		accepts a fractional qty, so ERPNext's own
+		``validate_uom_is_integer`` is the first code to reject this cart. It
+		runs inside ``insert()``, after every app-side gate has passed.
+		"""
+		payload = self._submit_payload(
+			client_accepted_grand_total="50",
+			items=[
+				{
+					"item_code": self.item,
+					"qty": "0.5",
+					"uom": self.uom,
+					"batch_no": None,
+					"serial_numbers": [],
+				}
+			],
+			payments=[{"mode_of_payment": "Cash", "amount": "50", "reference_no": None}],
+		)
+		result, _ = self._call_submit(payload)
+		self.assertFalse(result["ok"], msg=str(result))
+		self.assertEqual(result["error"]["code"], "DOCUMENT_VALIDATION_FAILED")
+		self.assertEqual(result["error"]["details"]["doctype"], "POS Invoice")
+		self.assertEqual(result["error"]["details"]["exception"], "UOMMustBeIntegerError")
+		self.assertFalse(result["error"]["retryable"])
+		self.assertNotIn("<", result["error"]["details"]["display_message"])
+		self._assert_no_persisted_artifacts(self.profile.name)
+
+	def test_cashier_submit_keeps_internal_validation_errors_unmapped(self):
+		"""A framework validation subclass means our own code built a bad doc.
+
+		Mapping it to a cashier-facing domain code would hide a server defect,
+		so it must keep propagating to Frappe's own 500 handling.
+		"""
+		quote = self._call_quote(self._quote_payload())
+		payload = self._submit_payload(
+			client_accepted_grand_total=str(Decimal(quote["data"]["grand_total"])),
+			payments=[
+				{
+					"mode_of_payment": "Cash",
+					"amount": str(Decimal(quote["data"]["payable"])),
+					"reference_no": None,
+				}
+			],
+		)
+		with (
+			patch(
+				"roti_ropi_pos.overrides.pos_invoice.MobilePOSInvoice.insert",
+				side_effect=frappe.MandatoryError("customer is required"),
+			),
+			self.assertRaises(frappe.MandatoryError),
+		):
+			self._call_submit(payload)
+		self._assert_no_persisted_artifacts(self.profile.name)
+
 	def test_cashier_submit_malformed_decimal_is_rejected(self):
 		payload = self._submit_payload(
 			payments=[{"mode_of_payment": "Cash", "amount": ".5", "reference_no": None}],
