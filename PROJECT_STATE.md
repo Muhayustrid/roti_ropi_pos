@@ -436,8 +436,8 @@ Scope is P0 only. P1/P2 findings, core Frappe/ERPNext files, `development.localh
 |---|---|---|
 | P0-1 | C-1 route-alias auth bypass | **Complete — green, reviewed, committed** |
 | P0-2 | I-5 / I-6 idempotency contention and stable error behaviour | **Complete — green, mutation-verified, committed** |
-| P0-3 | I-2 Administrator elevation in closing | Not started |
-| P0-4 | I-1 closing transaction / savepoint boundary | Not started |
+| P0-3 | I-2 Administrator elevation in closing | **Complete — green, mutation-verified, committed** |
+| P0-4 | I-1 closing transaction / savepoint boundary | In progress |
 | P0-5 | I-3 lost-key closing recovery | Not started |
 | P0-6 | I-4 ERPNext sale/return error mapping | Not started |
 | P0-7 | I-16 money-path evidence restoration | Not started |
@@ -498,8 +498,8 @@ Committed for this boundary in `fix: gate Mobile POS aliases by resolved dispatc
 `roti_ropi_pos/tests/helpers.py`, and this file. No migrate ran. `test_sales.py` and the
 extraction-design status line remain the pre-existing local edits described in §8.
 
-**Next action:** P0-3 — I-2, remove the Administrator elevation in `closing.py`. Not started in this
-session; it was deliberately deferred so P0-2 stayed a single boundary.
+**Next action:** P0-3 was completed in a later session (see § P0-3 below). The next boundary is P0-4 —
+I-1, the closing transaction / savepoint boundary.
 
 ### P0-2 / I-5 + I-6 — complete
 
@@ -562,3 +562,115 @@ Committed for this boundary in `fix: stabilize idempotency contention recovery`:
 `roti_ropi_pos/tests/test_idempotency.py`, `roti_ropi_pos/tests/test_api_foundation.py`,
 `docs/mobile-pos/api-contract.md`, and this file. No migrate ran; no schema or DocType JSON changed.
 `test_sales.py` and the extraction-design status line remain the pre-existing local edits from §8.
+
+### P0-3 / I-2 — complete
+
+Root cause, measured on `mobile-pos-regression.localhost` rather than inferred. `_submit_persisted_closing`
+and `ensure_committed_closing_job` both wrapped ERPNext work in `frappe.set_user("Administrator")`. The
+elevation existed because the consolidation chain ends in a permission check the cashier could not pass:
+`POSClosingEntry.on_submit` → `consolidate_pos_invoices` → `create_merge_logs` → `merge_log.save(ignore_permissions=True)`
++ `merge_log.submit()` → `POSInvoiceMergeLog.on_submit` → `process_merging_into_sales_invoice` →
+`sales_invoice.save()` / `.submit()` **without** `ignore_permissions`. Removing the elevation with no grant
+returns `INVALID_REQUEST` with `details.reason = PermissionError`, traceback ending at
+`frappe/model/document.py:check_permission`.
+
+Fix (minimal, two files plus the fixture):
+
+- `roti_ropi_pos/mobile_pos/closing.py`: both `frappe.set_user("Administrator")` blocks deleted. The
+  submit and the deferred consolidation now run as the requesting cashier. `frappe.enqueue` records
+  `frappe.session.user` and `execute_job` re-applies it, so the queued path keeps the same authority.
+  `grep set_user` over production code (`roti_ropi_pos/*.py`, `mobile_pos/`, `api/`, `overrides/`) now
+  returns nothing.
+- `roti_ropi_pos/fixtures/custom_docperm.json` (+130 lines, additive only — `git diff --numstat` shows
+  `130 0`): the four standard ERPNext `Sales Invoice` DocPerm rows mirrored (required because
+  `frappe/model/meta.py` replaces `permissions` wholesale once any `Custom DocPerm` exists for a DocType,
+  so adding one row without mirroring would delete Accounts User/Manager access), plus one cashier row:
+  `create`, `write`, `submit`, `if_owner = 1`. No `read`, `cancel`, `delete`, `amend`, `report`, `export`,
+  or `share`. The permission set is measured, not guessed: `create + submit + if_owner` without `write`
+  still fails.
+- `roti_ropi_pos/hooks.py`: `"Sales Invoice"` added to the `Custom DocPerm` fixture filter so the rows
+  export and sync.
+- `AGENTS.md`: the cashier table row changed from `Sales Invoice | none` to
+  `create, write, submit (owner-scoped: if_owner = 1)`, with the integration-test justification that
+  `AGENTS.md` itself requires, and an explicit "never elevate to Administrator" rule.
+
+Tests (`roti_ropi_pos/tests/test_closing.py`, +7 tests, 45 → 52):
+
+- `test_sync_closing_never_switches_to_administrator` — patches `frappe.set_user` and asserts
+  `"Administrator"` never appears.
+- `test_sync_closing_consolidates_sales_invoice_owned_by_cashier` and
+  `test_queued_consolidation_completes_and_consolidates_under_cashier_authority` — real consolidation on
+  both the `< 10` and the `>= 10` invoice path; the consolidated Sales Invoice is `docstatus = 1` and
+  owned by the cashier.
+- `test_queued_consolidation_runs_under_cashier_authority` — replaces
+  `test_queued_consolidation_uses_internal_identity_and_restores_cashier`, whose assertion
+  (`users == ["Administrator"]`) *was* the defect.
+- `test_cashier_cannot_write_another_cashiers_consolidated_invoice` — cashier B is denied read, write,
+  submit, cancel, and delete on cashier A's consolidated invoice.
+- `test_closing_submit_is_scoped_to_the_requesting_cashier_and_profile` — cashier B closing cashier A's
+  opening returns `PROFILE_SCOPE_MISMATCH` and creates no closing.
+- `test_missing_sales_invoice_permission_fails_deterministically` — a `PermissionError` from submit stays
+  `INVALID_REQUEST` / `details.reason = PermissionError` and replays identically.
+- `test_cashier_sales_invoice_grant_is_owner_scoped_not_broad` — mutation gate on the grant itself.
+- `roti_ropi_pos/tests/test_authentication.py`: the fixture contract test now expects 9 cashier rows and
+  asserts the exact `Sales Invoice` permission shape.
+
+Evidence (all fresh, `mobile-pos-regression.localhost`):
+
+- RED before the fix: `test_sync_closing_never_switches_to_administrator`
+  (`'Administrator' unexpectedly found in [...]`), `test_queued_consolidation_runs_under_cashier_authority`
+  (`['Administrator'] != ['closing-…@rotiropi.test']`), both consolidation-owner tests
+  (`'Administrator' != 'closing-…@rotiropi.test'`).
+- GREEN: `test_closing` `Ran 52 tests in 143.618s OK`; `test_authentication` `Ran 36 tests in 42.929s OK`.
+- Mutation, applied in a console transaction and rolled back: `if_owner = 0` on the cashier row makes a
+  non-owner evaluate to `write = 1, submit = 1` and `has_if_owner_enabled = False`, which
+  `test_cashier_sales_invoice_grant_is_owner_scoped_not_broad` asserts against. Restored to `if_owner = 1`.
+- Neighbours: `test_sessions` 10 OK, `test_api_foundation` 15 OK, `test_bootstrap` 9 OK,
+  `test_sale_task9` 58 OK, `test_return_task10` 21 OK, `test_user_override` 2 OK, `test_customers` 7 OK,
+  `test_opening_amounts` 21 OK, `test_idempotency` 32 OK.
+- Ruff 0.14.10 `check` all passed; `format` reformatted `test_closing.py` once, then 5 files already
+  formatted; `git diff --check` clean.
+
+Environment repairs made on the dedicated site only (test-code / site-config, no production change):
+
+- `roti_ropi_pos/tests/test_sessions.py:make_plain_user` now wraps its insert in `frappe.flags.in_import`,
+  the same guard `helpers.make_cashier` already used. Core throttles user creation to
+  `throttle_user_limit` per hour (`frappe.core.doctype.user.user.throttle_user_creation`) and repeated
+  suite runs on one site had reached 93 users/hour, so `test_authentication` errored with
+  `ValidationError: Throttled` — an environmental limit, not a regression.
+- `sites/mobile-pos-regression.localhost/site_config.json` gained `throttle_user_limit: 5000`, because
+  `test_idempotency.test_twenty_concurrent_attempts_...` calls core's own `create_user`, which no test-code
+  guard can reach. Site config only; no other site touched.
+
+Pre-existing neighbour failures, proved baseline by stash diff rather than assumed. `git stash push` of
+exactly the eight changed files, then the same four suites, then `git stash pop` and the same four suites
+again, produced identical failure sets before and after:
+
+- `test_sales` 4 failures both times: `test_batch_tracked_item_requires_batch_selection`,
+  `test_distinct_keys_cannot_oversell_same_stock`, `test_insufficient_stock_rolls_back_invoice_and_request`,
+  `test_serialized_item_requires_serial_selection`. All four are one shared-site data condition, not a code
+  fault: `_Test Item` stock in `_Test Warehouse - _TC` has drifted to `available_qty = -5909.0` from
+  accumulated suite runs, so the oversell guard reports `INSUFFICIENT_STOCK` before the batch and serial
+  validators can run, and the "insufficient stock" case cannot construct a shortage large enough to fail.
+  The evidence is in the failure payloads themselves (`available = -5909.0`,
+  `'INSUFFICIENT_STOCK' != 'INVALID_SERIAL_NUMBER'`). Nothing in the P0-3 diff touches sales, stock, or
+  the oversell path. Fixing these fixtures belongs to P0-7, which owns fixture baselines.
+- `test_mobile_pos_flow` 2 errors, `test_catalog` 1 failure
+  (`test_effective_scanner_is_stock_override`), `test_source_contracts` 2 failures
+  (`test_effective_past_order_provider_is_selling_additional`,
+  `test_frappe_dispatch_resolves_effective_stock_scanner`) — identical before and after, and the same
+  missing-app baseline already recorded in §8: this site carries only `frappe`, `erpnext`,
+  `bakery_manufacturing`, `roti_ropi_pos`, so the `stock_additional` and `selling_additional` dispatch
+  contracts cannot resolve. Not accepted as P0-7 evidence; P0-7 runs on a site holding all four apps.
+
+Committed for this boundary in `fix: run closing consolidation under cashier authority`:
+`roti_ropi_pos/mobile_pos/closing.py`, `roti_ropi_pos/fixtures/custom_docperm.json`,
+`roti_ropi_pos/hooks.py`, `roti_ropi_pos/tests/test_closing.py`,
+`roti_ropi_pos/tests/test_authentication.py`, `roti_ropi_pos/tests/test_sessions.py`, `AGENTS.md`,
+`docs/mobile-pos/backend-readiness-audit.md`, and this file. `bench migrate` ran on
+`mobile-pos-regression.localhost` only, to sync the fixture; no schema or DocType JSON changed.
+`test_sales.py` and the extraction-design status line remain the pre-existing local edits from §8.
+
+**Correction to the P0-2 section:** P0-2 was already committed *and* pushed before this session started
+(`e34e373`, `git rev-list --left-right --count origin/main...HEAD` = `0 0`). Any note implying it was
+uncommitted is wrong.

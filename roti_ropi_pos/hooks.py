@@ -216,6 +216,7 @@ fixtures = [
 					"POS Closing Entry",
 					"Customer",
 					"Item",
+					"Sales Invoice",
 					"Serial and Batch Bundle",
 				],
 			],

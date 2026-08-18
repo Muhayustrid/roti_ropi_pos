@@ -99,7 +99,7 @@ class TestAuthentication(IntegrationTestCase):
 		with open(frappe.get_app_path("roti_ropi_pos", "fixtures", "custom_docperm.json")) as fixture:
 			rows = json.load(fixture)
 		cashier_rows = [row for row in rows if row["role"] == "Mobile POS Cashier"]
-		self.assertEqual(len(cashier_rows), 8)
+		self.assertEqual(len(cashier_rows), 9)
 		self.assertTrue(any(row["role"] != "Mobile POS Cashier" for row in rows))
 		self.assertEqual(
 			{row["parent"] for row in cashier_rows},
@@ -111,7 +111,26 @@ class TestAuthentication(IntegrationTestCase):
 				"POS Closing Entry",
 				"Customer",
 				"Item",
+				"Sales Invoice",
 				"Serial and Batch Bundle",
+			},
+		)
+		# Consolidation saves/submits the consolidated Sales Invoice under the
+		# cashier's own authority, so the grant is owner-scoped and read-free.
+		sales_invoice = next(row for row in cashier_rows if row["parent"] == "Sales Invoice")
+		self.assertEqual(
+			{
+				permission: int(bool(sales_invoice.get(permission)))
+				for permission in ("read", "write", "create", "submit", "if_owner", "cancel", "delete")
+			},
+			{
+				"read": 0,
+				"write": 1,
+				"create": 1,
+				"submit": 1,
+				"if_owner": 1,
+				"cancel": 0,
+				"delete": 0,
 			},
 		)
 		bundle = next(row for row in cashier_rows if row["parent"] == "Serial and Batch Bundle")

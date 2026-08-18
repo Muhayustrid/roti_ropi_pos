@@ -214,12 +214,15 @@ def _create_closing_draft(profile, payload: dict, transaction_id: str):
 
 
 def _submit_persisted_closing(closing_name: str) -> None:
-	cashier = frappe.session.user
-	frappe.set_user("Administrator")
-	try:
-		frappe.get_doc("POS Closing Entry", closing_name).submit()
-	finally:
-		frappe.set_user(cashier)
+	"""Submit the persisted closing under the requesting cashier's own authority.
+
+	ERPNext consolidation saves and submits the consolidated Sales Invoice without
+	`ignore_permissions`, so the cashier role carries an explicit owner-scoped
+	Sales Invoice grant (`roti_ropi_pos/fixtures/custom_docperm.json`) instead of
+	the request being elevated to `Administrator`. A missing grant must surface as
+	a deterministic `PermissionError`, never be masked by impersonation.
+	"""
+	frappe.get_doc("POS Closing Entry", closing_name).submit()
 
 
 def _complete_from_persisted(scope_key: str) -> dict:
@@ -604,7 +607,12 @@ def _lock_opening(opening_name: str) -> None:
 
 
 def ensure_committed_closing_job(closing_name: str) -> None:
-	"""Enqueue consolidation after DB commit if entry is still Queued."""
+	"""Enqueue consolidation after DB commit if entry is still Queued.
+
+	Runs as the requesting cashier: `frappe.enqueue` records `frappe.session.user`
+	and the worker re-applies it, so the queued consolidation carries the same
+	authority as the synchronous path and no identity is elevated.
+	"""
 	from erpnext.accounts.doctype.pos_invoice_merge_log.pos_invoice_merge_log import (
 		consolidate_pos_invoices,
 	)
@@ -612,9 +620,4 @@ def ensure_committed_closing_job(closing_name: str) -> None:
 	closing = frappe.get_doc("POS Closing Entry", closing_name)
 	if closing.docstatus != 1 or closing.status != "Queued":
 		return
-	cashier = frappe.session.user
-	frappe.set_user("Administrator")
-	try:
-		consolidate_pos_invoices(closing_entry=closing)
-	finally:
-		frappe.set_user(cashier)
+	consolidate_pos_invoices(closing_entry=closing)

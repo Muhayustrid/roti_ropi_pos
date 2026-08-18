@@ -277,5 +277,14 @@ def make_plain_user(email: str) -> str:
 	)
 	user.flags.ignore_validate = True
 	user.flags.ignore_links = True
-	user.insert(ignore_permissions=True)
+	# Core throttles user creation to `throttle_user_limit` per hour and exempts
+	# imports, so repeated suite runs on one site would otherwise raise "Throttled"
+	# (`frappe.core.doctype.user.user.throttle_user_creation`). Same guard as
+	# `roti_ropi_pos.tests.helpers.make_cashier`.
+	previous_import_flag = frappe.flags.in_import
+	frappe.flags.in_import = True
+	try:
+		user.insert(ignore_permissions=True)
+	finally:
+		frappe.flags.in_import = previous_import_flag
 	return email

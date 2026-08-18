@@ -733,7 +733,8 @@ class TestClosingPreview(IntegrationTestCase):
 		self.assertEqual(closing["status"], "queued")
 		self.assertEqual(closing["invoice_count"], 10)
 
-	def test_queued_consolidation_uses_internal_identity_and_restores_cashier(self):
+	def test_queued_consolidation_runs_under_cashier_authority(self):
+		"""I-2: deferred consolidation keeps the cashier identity, never Administrator."""
 		from roti_ropi_pos.mobile_pos.closing import ensure_committed_closing_job
 
 		closing = MagicMock(docstatus=1, status="Queued")
@@ -748,8 +749,136 @@ class TestClosingPreview(IntegrationTestCase):
 		):
 			ensure_committed_closing_job("TEST-CLO")
 
-		self.assertEqual(users, ["Administrator"])
+		self.assertEqual(users, [self.cashier])
 		self.assertEqual(frappe.session.user, self.cashier)
+
+	def test_queued_consolidation_completes_and_consolidates_under_cashier_authority(self):
+		"""Real >= 10 invoice path: consolidation succeeds without privilege elevation."""
+		sales = [self._submit_sale()["data"]["sale"]["summary"]["name"] for _ in range(10)]
+		result = self._close(str(uuid4()))
+		self.assertTrue(result["ok"], result)
+		self.assertEqual(result["data"]["closing"]["invoice_count"], 10)
+		consolidated = {frappe.db.get_value("POS Invoice", sale, "consolidated_invoice") for sale in sales}
+		self.assertNotIn(None, consolidated)
+		for invoice in consolidated:
+			self.assertEqual(frappe.db.get_value("Sales Invoice", invoice, "owner"), self.cashier)
+			self.assertEqual(frappe.db.get_value("Sales Invoice", invoice, "docstatus"), 1)
+
+	# ── submit authority (I-2) ───────────────────────────────────────────
+
+	def test_sync_closing_never_switches_to_administrator(self):
+		"""I-2: the whole submit path runs as the cashier; no set_user elevation."""
+		self._submit_sale()
+		observed = []
+		original_set_user = frappe.set_user
+
+		def record_set_user(user, *args, **kwargs):
+			observed.append(user)
+			return original_set_user(user, *args, **kwargs)
+
+		with patch("frappe.set_user", side_effect=record_set_user):
+			result = self._close(str(uuid4()))
+
+		self.assertTrue(result["ok"], result)
+		self.assertNotIn("Administrator", observed)
+		self.assertEqual(frappe.session.user, self.cashier)
+
+	def test_sync_closing_consolidates_sales_invoice_owned_by_cashier(self):
+		"""The consolidated Sales Invoice is created by the cashier, not a service identity."""
+		sale = self._submit_sale()["data"]["sale"]["summary"]["name"]
+		result = self._close(str(uuid4()))
+		self.assertTrue(result["ok"], result)
+		self.assertEqual(result["data"]["closing"]["status"], "submitted")
+		invoice = frappe.db.get_value("POS Invoice", sale, "consolidated_invoice")
+		self.assertIsNotNone(invoice)
+		self.assertEqual(frappe.db.get_value("Sales Invoice", invoice, "owner"), self.cashier)
+		self.assertEqual(frappe.db.get_value("Sales Invoice", invoice, "is_consolidated"), 1)
+
+	def test_cashier_cannot_write_another_cashiers_consolidated_invoice(self):
+		"""Cashier B must not read/write/submit cashier A's consolidated Sales Invoice.
+
+		`create` stays granted for every cashier because core never downgrades
+		`create` under `if_owner` (`frappe/permissions.py` `get_role_permissions`);
+		document-scoped rights are what isolate one cashier's money records.
+		"""
+		sale = self._submit_sale()["data"]["sale"]["summary"]["name"]
+		self.assertTrue(self._close(str(uuid4()))["ok"])
+		invoice = frappe.db.get_value("POS Invoice", sale, "consolidated_invoice")
+		frappe.set_user("Administrator")
+		other = make_cashier(f"cross-{frappe.generate_hash(length=8)}@rotiropi.test")
+		frappe.db.set_value("User", other, "user_type", "System User")
+		frappe.cache.hdel("roles", other)
+		frappe.set_user(other)
+		document = frappe.get_doc("Sales Invoice", invoice)
+		for ptype in ("read", "write", "submit", "cancel", "delete"):
+			with self.subTest(ptype=ptype):
+				self.assertFalse(document.has_permission(ptype))
+
+	def test_closing_submit_is_scoped_to_the_requesting_cashier_and_profile(self):
+		"""Cashier B cannot close cashier A's opening even with a valid own profile."""
+		self._submit_sale()
+		payload = self._closing_payload()
+		frappe.set_user("Administrator")
+		other = make_cashier(f"scope-{frappe.generate_hash(length=8)}@rotiropi.test")
+		frappe.db.set_value("User", other, "user_type", "System User")
+		frappe.cache.hdel("roles", other)
+		frappe.set_user(other)
+		result = self._close(str(uuid4()), payload=payload)
+		self.assertFalse(result["ok"], result)
+		self.assertEqual(result["error"]["code"], "PROFILE_SCOPE_MISMATCH")
+		self.assertEqual(
+			frappe.db.count("POS Closing Entry", {"pos_opening_entry": self.opening}),
+			0,
+		)
+
+	def test_missing_sales_invoice_permission_fails_deterministically(self):
+		"""Without the cashier Sales Invoice grant, consolidation fails as a stable error."""
+		self._submit_sale()
+		key = str(uuid4())
+		with patch(
+			"roti_ropi_pos.mobile_pos.closing._submit_persisted_closing",
+			side_effect=frappe.PermissionError("no Sales Invoice write"),
+		):
+			first = self._close(key)
+			replay = self._close(key)
+		self.assertFalse(first["ok"])
+		self.assertEqual(first["error"]["code"], "INVALID_REQUEST")
+		self.assertEqual(first["error"]["details"]["reason"], "PermissionError")
+		self.assertEqual(replay["error"], first["error"])
+		self.assertTrue(replay["meta"]["replayed"])
+
+	def test_cashier_sales_invoice_grant_is_owner_scoped_not_broad(self):
+		"""Mutation gate: the grant that replaces elevation must not be a broad bypass.
+
+		Core keeps owner-only rights in the `if_owner` sub-dict and forces the
+		top-level ptype to 0 (`frappe/permissions.py` `get_role_permissions`), so
+		write/submit resolve only for the owner. Widening the fixture to
+		`if_owner = 0` would grant them irrespective of ownership and fail this test.
+		"""
+		as_owner = frappe.permissions.get_role_permissions("Sales Invoice", user=self.cashier, is_owner=True)
+		as_stranger = frappe.permissions.get_role_permissions(
+			"Sales Invoice", user=self.cashier, is_owner=False
+		)
+		self.assertTrue(as_owner["has_if_owner_enabled"])
+		self.assertEqual(as_owner["if_owner"], {"write": 1, "submit": 1})
+		self.assertEqual(as_stranger["if_owner"], {"write": 0, "submit": 0})
+		for label, permissions in (("owner", as_owner), ("stranger", as_stranger)):
+			with self.subTest(evaluated_as=label):
+				self.assertEqual(
+					{
+						ptype: permissions.get(ptype)
+						for ptype in ("read", "write", "submit", "cancel", "delete", "amend", "share")
+					},
+					{
+						"read": 0,
+						"write": 0,
+						"submit": 0,
+						"cancel": 0,
+						"delete": 0,
+						"amend": 0,
+						"share": 0,
+					},
+				)
 
 	# ── status ───────────────────────────────────────────────────────────
 

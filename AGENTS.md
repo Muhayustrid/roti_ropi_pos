@@ -92,12 +92,13 @@ session must be able to resume without conversation history. Trivial edits need 
 | POS Closing Entry | read, create, write, submit |
 | Customer | read |
 | Item | read |
-| Sales Invoice | none |
+| Sales Invoice | create, write, submit (owner-scoped: `if_owner = 1`) |
 | Mobile POS Request | none for the user; service-controlled only |
 
 - Grant no cashier cancel, delete, amend, report, export, import, or share rights.
 - Add a permission only after an integration test proves that an exact DocType permission is required. Never substitute a broad ERPNext role.
 - Use normal permissions for ERPNext business documents. The app-owned Mobile POS Request service is the sole permitted `ignore_permissions=True` exception.
+- Never elevate a cashier request to `Administrator`. ERPNext consolidation saves and submits the consolidated Sales Invoice without `ignore_permissions`, so the cashier holds an owner-scoped Sales Invoice grant instead (proved by `test_closing.test_sync_closing_consolidates_sales_invoice_owned_by_cashier` and `test_queued_consolidation_completes_and_consolidates_under_cashier_authority`; the owner scope is held by `test_cashier_sales_invoice_grant_is_owner_scoped_not_broad`). The cashier gets no Sales Invoice read, cancel, delete, or amend right, and cannot write another cashier's consolidated invoice.
 
 ### Endpoint Checks
 
