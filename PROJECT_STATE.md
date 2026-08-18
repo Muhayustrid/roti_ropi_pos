@@ -1,10 +1,9 @@
 # PROJECT_STATE.md — AI session resume checkpoint
 
-**Last updated:** 2026-08-17, after Phase 2 was packaged and committed in all three implementation
-repositories.
-**Resume point:** Phase 2 is complete, the cutover site is migrated and green, and every intended
-Phase 2 change is committed. The only remaining boundary is Phase 3 approval — NOT started, NOT
-approved. Nothing has been pushed.
+**Last updated:** 2026-08-18, after final Git integration completed in all four custom apps.
+**Resume point:** Project complete. Phase 3 rollout and final review passed. All intended project source
+is committed, every feature branch is published, and each expected history is integrated into
+`origin/main` without force. Protected and unrelated local overlays remain deliberately uncommitted.
 
 This file is the current-state save game, not a history. Git, tests, and the live site override it.
 If it conflicts with verified evidence, fix this file.
@@ -35,7 +34,7 @@ spec does not state.
 | 0 — app shells | `docs/superpowers/plans/2026-08-14-additional-app-shells.md` | Complete |
 | 1 — stock cutover | `docs/superpowers/plans/2026-08-14-stock-additional-cutover.md` | Complete and closed |
 | 2 — selling cutover | `docs/superpowers/plans/2026-08-14-selling-additional-cutover.md` | **Complete — all 12 tasks, final gate, independent review, the authorized cutover-site migrate, and packaging/commit all passed** |
-| 3 — production rollout | `docs/superpowers/plans/2026-08-14-app-ownership-rollout.md` | Not started, not approved |
+| 3 — production rollout | `docs/superpowers/plans/2026-08-14-app-ownership-rollout.md` | **Complete — main-site rollout verified, Critical 0, Important 0, PASS** |
 
 Execution ledger (authoritative per-task record, including every ruling):
 `.superpowers/sdd/2026-08-14-selling-additional-cutover/progress.md`. Every Phase 2 task
@@ -259,8 +258,8 @@ rehearsal restore source).
 
 ## 8. Pre-existing / unrelated state — do not modify
 
-- `development.localhost` holds shared real business data: read-only comparison at most, never
-  written. Phase 2 work used `selling-cutover.localhost` plus the two Task 12 scratch sites.
+- `development.localhost` holds shared real business data. Phase 3 rollout `ROLL-20260818-01` is the
+  only authorized ownership-cutover mutation recorded here. Future mutation needs fresh authorization.
 - `apps/erpnext/banking/yarn.lock`, `.codegraph/`, `graphify-out/` dirs in erpnext/frappe/bakery:
   not ours.
 - Roti's spec status line and `test_sales.py` teardown edit stay deliberately uncommitted.
@@ -291,19 +290,128 @@ Phase 2 implementation is committed in all three implementation repositories (`0
 
 ## 10. Resume here
 
-Phase 2 is complete, closed on the cutover site, and packaged. All twelve tasks, the final gate, the
-independent review, the authorized `selling-cutover.localhost` migrate, and the per-repository
-implementation commits have passed. `selling-cutover.localhost` shows zero RED tests, `preflight
-final` clean, selling owning the three DocTypes and every moved hook, its own navigation imported,
-and ERPNext's `Selling` sidebar free of the legacy Price Group row with nothing left to recreate it.
-Ruling AH is resolved (§7.1). No Phase 2 implementation change remains uncommitted; nothing is
-pushed.
+Phase 3 main-site rollout `ROLL-20260818-01` ran under explicit authorization on
+`development.localhost` in `frappe_docker_devcontainer-frappe-1`.
 
-Do NOT restart any Phase 2 task, do NOT re-run its investigations, and do NOT begin Phase 3.
+Rulings AK through AM remain in force. Ruling AN records that Stage A and source deployment were already
+complete. The target app order matched Rehearsal 2. All six rollout source identities and candidate-only
+file hashes matched the validated Rehearsal 2 state. The rollout therefore skipped shell reinstall and
+source reapplication, then ran every read-only identity and preflight gate.
 
-The single remaining boundary is **Phase 3 approval**. Phase 3 is NOT started and NOT approved. When
-the user grants it, work from `docs/superpowers/plans/2026-08-14-app-ownership-rollout.md`; its
-protected-path expectations must be re-measured first, because Step 4 still predicts the pre-packaging
-bundle shape (hash `72ce8f92…`, numstat `14 0` against a one-line HEAD blob) while HEAD's blob is now
-empty and the same numstat means something different. Push, tag, deploy, any further migrate, and
-active-site install each need their own explicit approval.
+Focused preflight passed after one burst worker drained 38 old dynamic-link jobs. The command did not
+purge the queue. The scheduler was disabled, no workers or HTTP service were active, and disk headroom
+was 177 GB. Stock staged preflight and selling pre-model-sync preflight passed. The recovery map needed
+zero entries.
+
+Recovery point `20260818_050304` contains database, public files, private files, and site config. The
+database gzip and both archives passed readability checks. The protected copy outside the site directory
+matches all source hashes. No secret or site-config content entered project files or chat.
+
+Exactly one intended `bench --site development.localhost migrate` ran. It exited 0 after 14 seconds.
+All three ownership patches executed with no skip, traceback, duplicate override warning, or orphan
+removal error.
+
+Current main-site state:
+
+- `Price Group`, `Price Group Item`, and `Price Group Outlet` belong to `Selling Additional`.
+- Their migration hashes match the owning JSON files.
+- Parent and child counts stayed `1`, `1`, and `1`.
+- Stored walk-in counts stayed `51` and `5`. The custom-UOM Item count stayed `42`.
+- Selling and stock final preflights pass every section.
+- Scanner, past-order, both walk-in validators, POS page asset, and Serial and Batch Bundle each have
+  exactly one provider.
+- The Selling Additional Workspace and Sidebar exist. ERPNext Selling has no legacy Price Group child.
+- Selling, stock, and bakery asset builds passed. Site and website caches were cleared.
+- Web, Socket.IO, scheduler process, and one worker are online.
+- Root HTTP, `frappe.ping`, and the Desk login route pass.
+- Maintenance mode and `pause_scheduler` are off. The site scheduler returned to its disabled baseline.
+- The queue is empty.
+- The bakery bundle remains exactly `8b04313861b211aa17cb4d0c87c372d32e2f8b0d642b94292e58a7865ae1bbf1`.
+- Frappe has no tracked diff. ERPNext retains only the known `banking/yarn.lock` tracked diff.
+
+Known nonblocking tooling defect: `collect_business_checksums()` does not normalize Python `date` values
+before `json.dumps()`. The Task 13 scratch-site idempotency evidence already passed in Rehearsal 2. The
+main-site preservation gate used exact redacted counts and both final preflights. Do not fix this during
+the live rollout review.
+
+Protected evidence lives under `sites/phase3-main-rollout-records`. The Phase 3 ledger records hashes,
+results, Ruling AN, and the final Git state without secret or business identifiers.
+
+Independent final review returned Critical 0, Important 2, Minor 4, FAIL. The two Important findings
+were missing Task 15 window evidence and missing durable per-file identity for uncommitted runtime source.
+Exact runtime-source records now exist, and eleven Rehearsal 2 candidate files match their recorded hashes.
+
+Fresh targeted gate status:
+
+- Selling hooks 5, navigation 7, walk-in 10, walk-in asset 12, past orders 9, and Price Group lifecycle
+  28 passed.
+- Stock hooks 4, scanner 7 plus 5, and preflight 16 passed.
+- Bakery scanner shims 3 passed.
+- Roti source contracts 37, user override 2, catalog 19, API foundation 14, and bootstrap 9 passed.
+- Fresh targeted total: 189 tests across 17 module runs.
+- Selling, stock, bakery runtime package, and Roti runtime package Ruff checks passed.
+- Reject the first targeted run because tests were disabled despite exit 0.
+- `test_user_override` root cause was an unrelated core cache callback. The fixed assertion rejects any
+  callback closure that captures `LazyUser`, which is the actual pickle hazard. Production code did not
+  change.
+- Bakery overlay-tool tests have pre-existing Ruff findings. Runtime package checks pass.
+
+Exact source identity now includes eleven Rehearsal 2 file hash matches, a runtime-source record, and a
+readable five-file runtime overlay archive. The archive records base commits, paths, byte sizes, modes,
+and SHA-256 values, so the uncommitted running source can be reconstructed without a commit or push.
+
+Main site remains migrated and serving. Ownership is `Selling Additional`. Maintenance mode and
+`pause_scheduler` are off. The scheduler remains disabled per baseline. One worker is online. The queue
+is empty. The protected bundle hash is unchanged. Recovery point `20260818_050304` remains valid.
+Test-site temporary settings were restored.
+
+Scoped re-review found I1 and I2 addressed. Final counts are Critical 0 and Important 0. Verdict: PASS.
+
+Final evidence corrections:
+
+- Valid fresh targeted total is 187 tests across 15 commands and 16 result groups. The earlier 189 count
+  double-counted the two user-override tests and is superseded.
+- Runtime Ruff checks used pinned version 0.14.10.
+- All runtime source files match Rehearsal 2. Ten of eleven recorded files remain byte-identical. The
+  only difference is the test-only `test_user_override.py` root-cause correction.
+- The five-file runtime overlay archive and manifest reproduce the deployed uncommitted runtime tree
+  from recorded base commits.
+
+Nonblocking follow-up findings remain in the Phase 3 ledger and scoped review report. The main-site
+rollout must not be repeated.
+
+Final Git integration completed on 2026-08-18 under explicit authorization.
+
+Final project commits:
+
+| Repository | Final project commit | Project integration `origin/main` | Merge mode |
+| --- | --- | --- | --- |
+| `selling_additional` | `e4284f71f611505bc876026de43f5f2dfa059b70` | `e4284f71f611505bc876026de43f5f2dfa059b70` | Fast-forward |
+| `stock_additional` | `8422130570085af5ca5aeb2ece6cee5f979d7d44` | `8422130570085af5ca5aeb2ece6cee5f979d7d44` | Fast-forward; no new Phase 3 commit |
+| `bakery_manufacturing` | `847b6c6b8aa14aced6d05fb06262a970eb3226b9` | `077e5a3128d09c0a47c08c0848b21b51ba01e809` | Normal merge |
+| `roti_ropi_pos` | `a99b0fc6963d75f0730432c33393a6506ead128a` | `a210a0cc3eb178ee12a2982002abbacc2960c3b4` | Normal merge |
+
+Every feature branch was pushed without force. Fresh remote checks prove each expected project commit is
+an ancestor of `origin/main`. No merge conflict occurred. The final Roti closeout documentation commit
+advances `origin/main` once after this file is written. Its hash is recorded in the Phase 3 ledger and
+final report instead of creating a self-referential commit loop.
+
+The final focused Selling gate used Ruff 0.14.10. Migration ran 14 tests OK. Preflight initially exposed
+three test-only failures caused by a removed site-global POS Profile fixture. The tests now construct the
+profiles they judge. The final preflight run passed 39 integration tests and 9 unit tests. The final
+migration rerun passed 14 tests.
+
+All intended project source is committed. Deliberate local state remains outside Git:
+
+- Bakery keeps the protected bundle overlay unstaged at SHA-256
+  `8b04313861b211aa17cb4d0c87c372d32e2f8b0d642b94292e58a7865ae1bbf1`. The committed bundle is empty.
+- Bakery keeps `test_desk_sidebar.py`, `diference.md`, and `graphify-out/` local.
+- Roti keeps the pre-existing `test_sales.py` teardown and extraction-design status edit local.
+- Tool directories, plan scratch files, and `skills-lock.json` remain local.
+- ERPNext keeps its pre-existing `banking/yarn.lock` edit. Frappe and ERPNext received no project commit.
+
+No migrate, deploy, restart, or business-data mutation ran during final Git integration.
+
+PHASE 3 COMPLETE — MAIN-SITE ROLLOUT VERIFIED AND REVIEW PASSED
+
+PROJECT COMPLETE — ALL INTENDED CHANGES COMMITTED, PUSHED, AND MERGED TO MAIN
