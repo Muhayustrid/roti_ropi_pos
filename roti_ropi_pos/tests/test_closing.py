@@ -14,7 +14,7 @@ from roti_ropi_pos.api.v1 import closing as closing_api
 from roti_ropi_pos.api.v1 import sessions as sessions_api
 from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 from roti_ropi_pos.tests.helpers import close_test_openings, make_cashier, make_opening_entry
-from roti_ropi_pos.tests.test_sessions import COMPANY, WAREHOUSE, make_valid_profile
+from roti_ropi_pos.tests.test_sessions import COMPANY, WAREHOUSE, company_currency, make_valid_profile
 
 ITEM = "_Test Item"
 
@@ -80,9 +80,6 @@ class TestClosingPreview(IntegrationTestCase):
 		self.profile = make_valid_profile(
 			f"Mobile POS Closing {frappe.generate_hash(length=8)}", self.cashier
 		)
-		self.profile.selling_price_list = frappe.db.get_value(
-			"Price List", {"selling": 1, "enabled": 1, "currency": self.profile.currency}, "name"
-		)
 		self.profile.append("item_groups", {"item_group": frappe.db.get_value("Item", ITEM, "item_group")})
 		self.profile.save(ignore_permissions=True)
 		self._ensure_item_price()
@@ -124,7 +121,9 @@ class TestClosingPreview(IntegrationTestCase):
 		self.assertEqual(
 			data["counted_amount_policy"],
 			{
-				"currency": "INR",
+				# The endpoint reads the Company's own default_currency, so the
+				# expectation follows the test Company rather than naming one currency.
+				"currency": company_currency(),
 				"decimal_places": 2,
 				"max_scale": 2,
 				"api_syntax": "ascii_decimal_dot",

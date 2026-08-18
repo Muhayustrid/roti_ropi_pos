@@ -75,9 +75,6 @@ class TestMobilePOSLifecycle(IntegrationTestCase):
 		)
 
 		self.profile = make_valid_profile(f"Mobile POS E2E {frappe.generate_hash(length=8)}", self.cashier)
-		self.profile.selling_price_list = frappe.db.get_value(
-			"Price List", {"selling": 1, "enabled": 1, "currency": self.profile.currency}, "name"
-		)
 		item_group = frappe.db.get_value("Item", ITEM, "item_group")
 		self.profile.append("item_groups", {"item_group": item_group})
 		# Cash handles refunds; Bank Draft proves distinct modes can fully settle one sale.

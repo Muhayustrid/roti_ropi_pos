@@ -202,7 +202,45 @@ class TestSessions(IntegrationTestCase):
 		self.assertEqual(error.exception.details["pos_profile"], self.profile.name)
 
 
+def company_currency() -> str:
+	"""The currency the test Company actually keeps its books in.
+
+	These suites used to hardcode INR, which is only what ERPNext's own test records
+	happen to use. On a site whose Companies and Price Lists are IDR the profile then
+	described a currency nothing else on the site shared, and every lookup filtered
+	by it came back empty.
+	"""
+	return frappe.get_cached_value("Company", COMPANY, "default_currency")
+
+
+def ensure_test_price_list(currency: str) -> str:
+	"""A selling Price List owned by these tests, in ``currency``.
+
+	Picking "any enabled selling Price List" made the suite depend on what the site
+	already held and on that list agreeing with the profile's currency — the two
+	disagree on an IDR site carrying ERPNext's INR test Company. Creating the list
+	makes the pair consistent by construction, on any site.
+	"""
+	name = f"_Test Mobile POS Selling {currency}"
+	if frappe.db.exists("Price List", name):
+		return name
+	return (
+		frappe.get_doc(
+			{
+				"doctype": "Price List",
+				"price_list_name": name,
+				"currency": currency,
+				"selling": 1,
+				"enabled": 1,
+			}
+		)
+		.insert(ignore_permissions=True)
+		.name
+	)
+
+
 def make_valid_profile(name: str, user: str, *, default: int = 1):
+	currency = company_currency()
 	mode = frappe.get_doc("Mode of Payment", "Cash")
 	if not frappe.db.exists("Mode of Payment Account", {"parent": "Cash", "company": COMPANY}):
 		mode.append("accounts", {"company": COMPANY, "default_account": "Sales - _TC"})
@@ -213,13 +251,13 @@ def make_valid_profile(name: str, user: str, *, default: int = 1):
 			"name": name,
 			"company": COMPANY,
 			"cost_center": "_Test Cost Center - _TC",
-			"currency": "INR",
+			"currency": currency,
 			"customer": frappe.db.get_value("Customer", {"disabled": 0}, "name"),
 			"customer_group": frappe.db.get_value("Customer Group", {"is_group": 0}, "name"),
 			"expense_account": "_Test Account Cost for Goods Sold - _TC",
 			"income_account": "Sales - _TC",
 			"naming_series": "_T-POS Profile-",
-			"selling_price_list": frappe.db.get_value("Price List", {"selling": 1, "enabled": 1}, "name"),
+			"selling_price_list": ensure_test_price_list(currency),
 			"territory": "_Test Territory",
 			"warehouse": WAREHOUSE,
 			"write_off_account": "_Test Write Off - _TC",
