@@ -8,7 +8,7 @@ app_license = "mit"
 # Apps
 # ------------------
 
-required_apps = ["erpnext", "bakery_manufacturing"]
+required_apps = ["erpnext", "stock_additional", "selling_additional"]
 
 # Each item in the list will be shown as an app in the apps page
 # add_to_apps_screen = [
@@ -169,6 +169,7 @@ scheduler_events = {
 override_doctype_class = {
 	"POS Invoice": "roti_ropi_pos.overrides.pos_invoice.MobilePOSInvoice",
 	"POS Closing Entry": "roti_ropi_pos.overrides.pos_closing_entry.MobilePOSClosingEntry",
+	"User": "roti_ropi_pos.overrides.user.MobilePOSUser",
 }
 
 # Overriding Methods

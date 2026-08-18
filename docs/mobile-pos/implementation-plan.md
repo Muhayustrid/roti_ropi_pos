@@ -29,7 +29,7 @@
 
 ## Global Constraints
 
-- **Verified**: Baseline versions are Frappe `16.27.1`, ERPNext `16.28.0`, `bakery_manufacturing` `0.0.1`, and `roti_ropi_pos` `0.0.1`.
+- **Verified**: Baseline versions are Frappe `16.27.1`, ERPNext `16.28.0`, `stock_additional` `0.0.1`, `selling_additional` `0.0.1`, `bakery_manufacturing` `0.0.1`, and `roti_ropi_pos` `0.0.1`.
 - **Proposed**: Never modify `apps/frappe` or `apps/erpnext`.
 - **Proposed**: Never trust client identity, company, warehouse, accounts, rates, taxes, totals, posting status, or document names.
 - **Proposed**: Do not use `ignore_permissions=True` for ERPNext business documents. The only exception is the app-owned `Mobile POS Request` control record, whose service validates scope and state transitions before privileged writes.
@@ -38,7 +38,7 @@
 - **Proposed**: Call POS Closing Entry submission, never merge-log helpers directly.
 - **Proposed**: Treat Graphify as navigation only and verify every imported source symbol against the installed files.
 - **Approved**: Do not stage, commit, push, or deploy merely because a phase/task was authorized. Every task ends with diff review and requires separate explicit user approval before any commit.
-- **Proposed**: V1 requires ERPNext POS Settings invoice mode `POS Invoice` and declares both ERPNext and `bakery_manufacturing` as app dependencies.
+- **Proposed**: V1 requires ERPNext POS Settings invoice mode `POS Invoice` and declares `stock_additional` as an app dependency (`selling_additional` added at selling cutover).
 - **Approved**: Android uses OAuth 2.0 Authorization Code with mandatory PKCE S256 as a public client. API keys, shared users, Administrator credentials, and embedded secrets are prohibited.
 - **Approved**: Cashiers use only `Mobile POS Cashier` plus exact Custom DocPerm fixtures; Sales Manager and broad accounting/administrative roles are not required.
 - **Approved**: Registered-customer selection and default walk-in Customer are supported without Customer auto-creation. Submitted sales must be fully settled, and idempotency terminal retention is 90 days.
@@ -112,13 +112,13 @@ The detailed task instructions remain authoritative. Phases add execution bounda
 
 ### Backend Phase 5: Catalog, Scan, Quote, UOM, and Stock
 
-- **Objective:** Expose scoped catalog, effective bakery scan behavior, and authoritative quote inputs.
+- **Objective:** Expose scoped catalog, effective stock scan behavior, and authoritative quote inputs.
 - **Included:** Task 5.
 - **Excluded:** Android cart/cache and authoritative sale submission.
-- **Prerequisites:** Backend Phase 4 and verified ERPNext/bakery source contracts.
+- **Prerequisites:** Backend Phase 4 and verified ERPNext/stock_additional source contracts.
 - **Ownership:** `roti_ropi_pos`.
-- **Verification:** `test_catalog`, bakery regressions, effective-override contract, and relevant ERPNext POS/stock regressions.
-- **Acceptance:** Catalog/scan/quote contracts pass without private bakery imports or copied ERPNext calculations.
+- **Verification:** `test_catalog`, stock_additional regressions, effective-override contract, and relevant ERPNext POS/stock regressions.
+- **Acceptance:** Catalog/scan/quote contracts pass without private stock_additional imports or copied ERPNext calculations.
 - **Stop:** Source-contract drift, wrong effective override, leaked Item data, duplicated core logic, or failed verification.
 - **Session boundary:** One Task 5 session, then boundary review and explicit approval.
 
@@ -382,7 +382,7 @@ Expected: FAIL because the DocType and service do not exist.
 
 - [ ] **Step 3: Create the DocType with an enforced unique scope key**
 
-Before the first migration, activate `required_apps = ["erpnext", "bakery_manufacturing"]` in `hooks.py` and verify both apps are installed on the test site.
+Before the first migration, activate `required_apps = ["erpnext", "stock_additional"]` in `hooks.py` and verify both apps are installed on the test site.
 
 Define the exact fields from `idempotency-and-recovery.md`, including phase, lease, terminal timestamps, 90-day expiry, retention hold/reason, and audit-reference state. Make `scope_key` unique, allow only `Processing`, `Completed`, and `Rejected`, and grant no normal-user Desk permissions. Add read-only `custom_mobile_pos_transaction_id` fixtures to POS Opening Entry, POS Invoice, and POS Closing Entry. Only the idempotency service writes the control record with `ignore_permissions=True`; ERPNext business documents use normal permission.
 
@@ -857,19 +857,19 @@ def scan_value(profile, value: str) -> dict:
     return map_scan_result(result, profile)
 ```
 
-Verify in a source-contract test that `frappe.override_whitelisted_method()` returns `bakery_manufacturing.overrides.barcode_scanner.custom_scan_barcode` when both apps are installed. Never import bakery internals directly from the catalog service.
+Verify in a source-contract test that `frappe.override_whitelisted_method()` returns `stock_additional.overrides.barcode_scanner.custom_scan_barcode` when both apps are installed. Never import stock_additional internals directly from the catalog service.
 
-If the effective scan result contains a non-stock UOM without `conversion_factor`, add the app warning `{ "code": "MISSING_UOM_CONVERSION", "message": "The selected UOM has no conversion factor." }`. Do not depend on or parse `frappe.msgprint` text emitted by the bakery override.
+If stock UOM resolution finds a missing or non-positive `conversion_factor`, it raises `stock_additional.exceptions.InvalidCustomUOMError`; fail closed rather than adding a warning or parsing `frappe.msgprint` text.
 
 - [ ] **Step 5: Implement authoritative quote calculation**
 
 Resolve customer through `mobile_pos.customers`, then use ERPNext item details/conversion/stock/batch functions with profile company, warehouse, resolved customer, price list, currency, quantity, UOM, and selected batch. Return structured warnings and reject expired/wrong-item/wrong-warehouse batches.
 
-- [ ] **Step 6: Run app and bakery regressions**
+- [ ] **Step 6: Run app and extracted-app regressions**
 
 ```bash
 bench --site development.localhost run-tests --module roti_ropi_pos.tests.test_catalog
-bench --site development.localhost run-tests --module bakery_manufacturing.tests.test_barcode_scanner
+bench --site development.localhost run-tests --module stock_additional.tests.test_barcode_scanner
 bench --site development.localhost run-tests --module bakery_manufacturing.bakery_manufacturing.doctype.price_group.test_price_group
 ```
 
@@ -1155,7 +1155,8 @@ bench --site development.localhost run-tests --module roti_ropi_pos.tests.test_c
 bench --site development.localhost run-tests --module roti_ropi_pos.tests.test_catalog
 bench --site development.localhost run-tests --module roti_ropi_pos.tests.test_sales
 bench --site development.localhost run-tests --module roti_ropi_pos.tests.test_closing
-bench --site development.localhost run-tests --module bakery_manufacturing.tests.test_barcode_scanner
+bench --site development.localhost run-tests --module stock_additional.tests.test_barcode_scanner
+bench --site development.localhost run-tests --module stock_additional.tests.test_uom_resolver
 bench --site development.localhost run-tests --module bakery_manufacturing.bakery_manufacturing.doctype.price_group.test_price_group
 bench --site development.localhost run-tests --module erpnext.tests.test_point_of_sale
 bench --site development.localhost run-tests --module erpnext.stock.tests.test_utils

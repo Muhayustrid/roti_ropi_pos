@@ -131,7 +131,7 @@ journeys above:
 | Open shift with configurable opening balances | ✓ |
 | Stale-opening warning for prior-day sessions | ✓ |
 | Item catalog search scoped to POS Profile | ✓ |
-| Barcode scanning with bakery UOM enrichment | ✓ |
+| Barcode scanning with batch UOM enrichment | ✓ |
 | Registered customer search and selection | ✓ |
 | Default walk-in customer with optional display name | ✓ |
 | Fully settled POS Invoice submission | ✓ |
@@ -267,7 +267,7 @@ Entry through ERPNext's controller.
 ### FR-4: Catalog and Scan
 
 The app must provide item search scoped to the POS Profile and barcode
-scanning that respects bakery UOM enrichment through the registered
+scanning that respects batch UOM enrichment through the registered
 ERPNext override.
 
 ### FR-5: Customer Selection
@@ -371,7 +371,7 @@ The MVP is accepted when:
 4. Customer search works correctly and no Customer records are
    auto-created.
 5. Walk-in display name is accepted only for the default walk-in customer.
-6. Barcode scanning resolves bakery UOM enrichment correctly.
+6. Barcode scanning resolves batch UOM enrichment correctly.
 7. Returns enforce quantity limits and require a reason.
 8. Closing handles both synchronous and asynchronous consolidation.
 9. Cashier accounts cannot access ERPNext Desk, generic API routes, or
@@ -385,7 +385,7 @@ The MVP is accepted when:
 
 ## 11. Operational Assumptions
 
-- ERPNext is deployed and operational with the `bakery_manufacturing` app
+- ERPNext is deployed and operational with the `stock_additional` app
   installed. POS Profiles, payment modes, warehouses, item catalogs, and
   price lists are configured before the mobile app is used.
 - Each cashier has a dedicated, enabled Frappe User account with only the
@@ -424,7 +424,8 @@ policy requires separate approval.
 | --- | --- |
 | **ERPNext 16.x** | Source of truth for POS Profiles, invoices, closings, pricing, taxes, stock, batch, serial, payments, and accounting. |
 | **Frappe 16.x** | Authentication, OAuth 2.0, permissions, document lifecycle, request handling, and background workers. |
-| **`bakery_manufacturing`** | Price Group synchronization, batch barcode UOM enrichment, and walk-in customer display name. |
+| **`bakery_manufacturing`** | Price Group synchronization and walk-in customer display name (current owner; `selling_additional` is the target after the selling cutover). |
+| **`stock_additional`** | Batch barcode UOM enrichment. |
 | **`roti_ropi_pos`** | Backend facade providing the versioned v1 API between the Android app and ERPNext. |
 
 ### Repository Constraints
@@ -454,5 +455,5 @@ policy requires separate approval.
 | [authentication.md](authentication.md) | OAuth 2.0 PKCE details, credential policies, route boundary, authorization model, DocType permission matrix, and security verification plan. |
 | [api-contract.md](api-contract.md) | Versioned API endpoint specifications, request/response schemas, error codes, envelope formats, and compatibility rules. |
 | [idempotency-and-recovery.md](idempotency-and-recovery.md) | Idempotency key contract, durable record schema, standard and closing-specific transaction algorithms, recovery protocol, and cleanup rules. |
-| [integration-boundaries.md](integration-boundaries.md) | Ownership matrix, ERPNext/Frappe/bakery integration rules, forbidden integration patterns, customer boundary, and dependency direction. |
+| [integration-boundaries.md](integration-boundaries.md) | Ownership matrix, ERPNext/Frappe/extracted-app integration rules, forbidden integration patterns, customer boundary, and dependency direction. |
 | [implementation-plan.md](implementation-plan.md) | Backend task-by-task implementation plan with phase roadmap, file map, test strategy, and acceptance criteria. |

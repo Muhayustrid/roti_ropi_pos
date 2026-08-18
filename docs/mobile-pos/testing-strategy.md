@@ -37,7 +37,7 @@
   - stock availability
   - return mapping
   - closing invoice retrieval
-- **Proposed**: Assert the effective `scan_barcode` hook resolves to the bakery override when both apps are installed.
+- **Proposed**: Assert the effective `scan_barcode` hook resolves to `stock_additional.overrides.barcode_scanner.custom_scan_barcode` when installed.
 - **Inferred**: These tests are the earliest warning that a Frappe/ERPNext minor upgrade changed an assumed boundary.
 
 ### Android Contract Tests
@@ -89,7 +89,7 @@
 - **Proposed**: Omitted customer resolves to the POS Profile default walk-in Customer.
 - **Proposed**: The configured default Customer passes the same existence, enabled, read-permission, and profile-group predicate tests as an explicit Customer.
 - **Proposed**: A missing, disabled, permission-inaccessible, or predicate-ineligible default returns `PROFILE_CONFIGURATION_INVALID`.
-- **Proposed**: Optional `walk_in_customer_name` is stored and returned only for the default walk-in Customer through bakery's existing field.
+- **Proposed**: Optional `walk_in_customer_name` is stored and returned only for the default walk-in Customer through `selling_additional`'s existing field.
 - **Proposed**: `walk_in_customer_name` is rejected for a registered non-walk-in Customer.
 - **Proposed**: Search, quote, sale, and return create no Customer rows.
 
@@ -97,7 +97,7 @@
 
 - **Proposed**: Catalog respects profile item groups, warehouse, price list, disabled items, and pagination limits.
 - **Proposed**: Exact barcode, serial, batch, and warehouse scan behavior matches ERPNext.
-- **Proposed**: A bakery batch QR returns `custom_default_uom_warehouse` and conversion factor.
+- **Proposed**: A batch QR returns `custom_default_uom_warehouse` and conversion factor.
 - **Proposed**: Missing batch UOM conversion produces a structured warning.
 - **Proposed**: Expired, wrong-item, wrong-warehouse, and insufficient-quantity batches fail before or during invoice submission.
 - **Proposed**: A concurrent stock change after quote is rejected by authoritative submit validation.
@@ -171,7 +171,8 @@ pre-commit run --all-files
 Run dependency regression modules from the bench:
 
 ```bash
-bench --site development.localhost run-tests --module bakery_manufacturing.tests.test_barcode_scanner
+bench --site development.localhost run-tests --module stock_additional.tests.test_barcode_scanner
+bench --site development.localhost run-tests --module stock_additional.tests.test_uom_resolver
 bench --site development.localhost run-tests --module bakery_manufacturing.bakery_manufacturing.doctype.price_group.test_price_group
 bench --site development.localhost run-tests --module erpnext.tests.test_point_of_sale
 bench --site development.localhost run-tests --module erpnext.stock.tests.test_utils
@@ -204,7 +205,7 @@ Run from `/Users/rotiropi/DockerERPNext/POSERPNext`:
 ## Backend Final Release Gate
 
 - **Proposed**: All `roti_ropi_pos` tests and static checks pass.
-- **Proposed**: Bakery barcode and Price Group regressions pass.
+- **Proposed**: `stock_additional` barcode/UOM and `bakery_manufacturing` Price Group regressions pass (`selling_additional` Price Group suite pending selling cutover).
 - **Proposed**: Selected ERPNext/Frappe source-contract suites pass on the exact deploy image.
 - **Proposed**: Backend staging smoke tests cover OAuth, opening, stale-opening warning, scan, sale, timeout replay, return, close, and close polling through contract-level API calls.
 - **Proposed**: Security review confirms no Guest endpoint, credential logging, cross-profile access, or blanket permission bypass.

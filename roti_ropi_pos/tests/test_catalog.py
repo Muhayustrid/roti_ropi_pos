@@ -12,10 +12,10 @@ from roti_ropi_pos.mobile_pos.errors import MobilePOSAPIError
 
 
 class TestCatalogContracts(IntegrationTestCase):
-	def test_effective_scanner_is_bakery_override(self):
+	def test_effective_scanner_is_stock_override(self):
 		self.assertEqual(
 			frappe.override_whitelisted_method("erpnext.stock.utils.scan_barcode"),
-			"bakery_manufacturing.overrides.barcode_scanner.custom_scan_barcode",
+			"stock_additional.overrides.barcode_scanner.custom_scan_barcode",
 		)
 		scanner = frappe.get_attr(frappe.override_whitelisted_method("erpnext.stock.utils.scan_barcode"))
 		self.assertIn(scanner, frappe.whitelisted)
@@ -310,6 +310,28 @@ class TestCatalogContracts(IntegrationTestCase):
 			result["warnings"],
 			[{"code": "MISSING_UOM_CONVERSION", "message": "The selected UOM has no conversion factor."}],
 		)
+
+	def test_scan_value_propagates_invalid_custom_uom_error_as_validation_error(self):
+		from roti_ropi_pos.mobile_pos.catalog import scan_value
+
+		profile = SimpleNamespace(name="POS-TEST", company="Test Company", warehouse="Test Warehouse")
+
+		class InvalidCustomUOMError(frappe.ValidationError):
+			pass
+
+		def raising_scanner(value, context):
+			raise InvalidCustomUOMError("Invalid UOM configuration")
+
+		with (
+			patch("roti_ropi_pos.mobile_pos.catalog.require_doc_permission"),
+			patch("frappe.override_whitelisted_method", return_value="test.scanner"),
+			patch("frappe.get_attr", return_value=raising_scanner),
+		):
+			with self.assertRaises(frappe.ValidationError) as exc:
+				scan_value(profile, "BATCH-001")
+
+		self.assertEqual(getattr(exc.exception, "http_status_code", None), 417)
+		self.assertEqual(frappe.ValidationError.http_status_code, 417)
 
 	def test_catalog_routes_and_methods_are_registered(self):
 		from roti_ropi_pos.api.v1 import catalog as catalog_api
