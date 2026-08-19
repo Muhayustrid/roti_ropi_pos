@@ -464,6 +464,150 @@ class TestNoERPNextTestModuleImports(IntegrationTestCase):
 		)
 
 
+class TestErrorCodeContract(IntegrationTestCase):
+	"""``docs/mobile-pos/api-contract.md`` must stay 1:1 with runtime error codes.
+
+	Android freezes its error enum from the contract tables, so a code that only one
+	side knows about is a client bug waiting to happen: an undocumented runtime code
+	reaches the app as an unknown value, and a documented code with no producer becomes
+	dead branches the app can never exercise. The runtime is authority — a failure here
+	means the document is stale, not that the runtime should change.
+	"""
+
+	# Non-error codes: stable enum values inside successful bodies (warnings,
+	# closing failure, returnability rejection), listed in their own contract table.
+	NON_ERROR_CODES = frozenset(
+		{
+			"STALE_OPENING",
+			"MISSING_UOM_CONVERSION",
+			"CLOSING_FAILED",
+			"SOURCE_NOT_RETURNABLE",
+			"RETURN_LIMIT_REACHED",
+			"NO_VALID_REFUND_MODE",
+			"SERIAL_BATCH_REFERENCE_UNAVAILABLE",
+		}
+	)
+
+	def _contract_path(self) -> Path:
+		return Path(frappe.get_app_path("roti_ropi_pos")).parent / "docs" / "mobile-pos" / "api-contract.md"
+
+	def _documented_codes(self) -> set[str]:
+		"""Codes in a leading `| HTTP | \\`CODE\\` |` cell of the main error table."""
+		import re
+
+		text = self._contract_path().read_text()
+		table = text.split("## Stable In-Endpoint Error Codes", 1)[1].split("### Removed", 1)[0]
+		return set(re.findall(r"^\|\s*\d{3}\s*\|\s*`([A-Z][A-Z0-9_]+)`\s*\|", table, re.MULTILINE))
+
+	def _runtime_codes(self) -> dict[str, set[str]]:
+		"""Map each runtime error-code literal to the modules that contain it.
+
+		Codes are collected by literal shape rather than from the first argument of
+		``MobilePOSAPIError``, because several are dispatched through a variable
+		(``closing._raise_payment_error``, ``closing._raise_closing_unavailable``) and a
+		first-argument scan would silently miss exactly the codes most likely to drift.
+		Success-body enum values match the same shape, so they are excluded through
+		``NON_ERROR_CODES`` and pinned by their own tests.
+		"""
+		import re
+
+		shape = re.compile(r"\A[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\Z")
+		app_path = Path(frappe.get_app_path("roti_ropi_pos"))
+		producers: dict[str, set[str]] = {}
+		for directory in ("mobile_pos", "api/v1"):
+			for source_path in sorted((app_path / directory).glob("*.py")):
+				tree = ast.parse(source_path.read_text())
+				for node in ast.walk(tree):
+					if (
+						isinstance(node, ast.Constant)
+						and isinstance(node.value, str)
+						and shape.match(node.value)
+						and node.value not in self.NON_ERROR_CODES
+					):
+						producers.setdefault(node.value, set()).add(source_path.name)
+		return producers
+
+	def test_every_runtime_error_code_is_documented(self):
+		undocumented = {
+			code: sorted(files)
+			for code, files in self._runtime_codes().items()
+			if code not in self._documented_codes()
+		}
+		self.assertEqual(
+			undocumented,
+			{},
+			"SOURCE CONTRACT: runtime raises Mobile POS error codes that the contract does not "
+			f"document: {undocumented} — add them to the Stable In-Endpoint Error Codes table in "
+			"docs/mobile-pos/api-contract.md before Android freezes its enum",
+		)
+
+	def test_every_documented_error_code_has_a_runtime_producer(self):
+		orphans = sorted(self._documented_codes() - set(self._runtime_codes()))
+		self.assertEqual(
+			orphans,
+			[],
+			f"SOURCE CONTRACT: contract documents error codes with no runtime producer: {orphans} — "
+			"remove or deprecate them in docs/mobile-pos/api-contract.md; the runtime is authority",
+		)
+
+	def test_non_error_codes_are_not_in_the_error_table(self):
+		"""Success-body enum values must not leak into the error-code table.
+
+		They are stable and frozen by Android too, but they never appear in
+		``message.error.code``, so documenting one as an error would make the client
+		expect an envelope it can never receive.
+		"""
+		leaked = sorted(self.NON_ERROR_CODES & self._documented_codes())
+		self.assertEqual(
+			leaked,
+			[],
+			f"SOURCE CONTRACT: non-error codes listed as in-endpoint errors: {leaked} — "
+			"keep them in the Non-Error Stable Codes table",
+		)
+
+	def test_non_error_codes_are_documented(self):
+		text = self._contract_path().read_text()
+		missing = sorted(code for code in self.NON_ERROR_CODES if f"`{code}`" not in text)
+		self.assertEqual(
+			missing,
+			[],
+			f"SOURCE CONTRACT: non-error stable codes are undocumented: {missing} — "
+			"add them to the Non-Error Stable Codes table in docs/mobile-pos/api-contract.md",
+		)
+
+	def test_retryable_codes_match_the_documented_pair(self):
+		"""Exactly the two documented codes may carry ``retryable=True``.
+
+		Android decides whether to resend a mutation with the same idempotency key from
+		this flag alone, so a new retryable code is a contract change, not an
+		implementation detail.
+		"""
+		app_path = Path(frappe.get_app_path("roti_ropi_pos"))
+		retryable = set()
+		for directory in ("mobile_pos", "api/v1"):
+			for source_path in sorted((app_path / directory).glob("*.py")):
+				for node in ast.walk(ast.parse(source_path.read_text())):
+					if (
+						isinstance(node, ast.Call)
+						and getattr(node.func, "id", None) == "MobilePOSAPIError"
+						and node.args
+						and isinstance(node.args[0], ast.Constant)
+						and any(
+							keyword.arg == "retryable"
+							and isinstance(keyword.value, ast.Constant)
+							and keyword.value.value is True
+							for keyword in node.keywords
+						)
+					):
+						retryable.add(node.args[0].value)
+		self.assertEqual(
+			retryable,
+			{"REQUEST_IN_PROGRESS", "TEMPORARILY_UNAVAILABLE"},
+			f"SOURCE CONTRACT: retryable Mobile POS error codes changed to {sorted(retryable)} — "
+			"update the Retryable Semantics section in docs/mobile-pos/api-contract.md",
+		)
+
+
 class TestRequiredDocTypeFields(IntegrationTestCase):
 	"""Custom fields our services read/write must exist on installed DocTypes."""
 

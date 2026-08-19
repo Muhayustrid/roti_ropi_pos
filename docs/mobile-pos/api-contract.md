@@ -88,6 +88,10 @@
 
 ## Stable In-Endpoint Error Codes
 
+- **Approved**: This table is the complete authoritative inventory of `message.error.code`
+  values a v1 endpoint can produce. Android freezes its error enum from this table and from
+  the non-error table below. A code absent from both tables is not part of v1.
+
 | HTTP | Code | Meaning | Retryable |
 | --- | --- | --- | --- |
 | 400 | `INVALID_REQUEST` | Syntax, type, or unsupported field error | No |
@@ -95,10 +99,11 @@
 | 403 | `PROFILE_SCOPE_MISMATCH` | Profile/document is outside user scope | No |
 | 404 | `RESOURCE_NOT_FOUND` | Visible resource does not exist | No |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | Same key has a different request hash | No |
-| 409 | `SESSION_ALREADY_OPEN` | User/profile has a conflicting opening | No |
-| 409 | `SESSION_ALREADY_CLOSED` | Opening is no longer open | No |
-| 409 | `DOCUMENT_STATE_CONFLICT` | Operation conflicts with current ERPNext state | Usually no |
 | 409 | `REQUEST_IN_PROGRESS` | A request with this idempotency key is still being processed | Yes |
+| 409 | `SESSION_ALREADY_OPEN` | User/profile has a conflicting opening | No |
+| 409 | `CLOSING_PREVIEW_STALE` | The bound Closing preview is no longer current | No |
+| 409 | `CLOSING_IN_PROGRESS` | A nonterminal Closing already holds this Opening | No |
+| 409 | `CLOSING_ALREADY_CLOSED` | The Opening was already terminally closed | No |
 | 409 | `CLOSING_RECOVERY_NOT_AVAILABLE` | No unresolved Closing exists for this session | No |
 | 409 | `CLOSING_RECOVERY_REQUIRES_MANAGER` | The unresolved Closing cannot be adopted safely; a manager must review it | No |
 | 422 | `NO_OPEN_SESSION` | Sale requires an active opening | No |
@@ -111,21 +116,79 @@
 | 422 | `RETURN_LIMIT_EXCEEDED` | Requested return exceeds source sale | No |
 | 422 | `PROFILE_CONFIGURATION_INVALID` | Assigned POS Profile configuration cannot satisfy the requested operation | No |
 | 422 | `DOCUMENT_VALIDATION_FAILED` | ERPNext rejected the document with one of its own declared domain rejection classes | No |
+| 422 | `CLOSING_PAYMENT_MODE_UNKNOWN` | A submitted Closing mode is not in the bound preview | No |
+| 422 | `CLOSING_PAYMENT_MODE_DUPLICATE` | A Closing mode appears more than once | No |
+| 422 | `CLOSING_PAYMENT_MODE_MISSING` | A preview mode is absent from the submitted Closing balances | No |
+| 422 | `CLOSING_DECIMAL_MALFORMED` | A counted Closing amount is not `ascii_decimal_dot` syntax | No |
+| 422 | `CLOSING_DECIMAL_SCALE_EXCEEDED` | A counted Closing amount has more fractional digits than `max_scale` | No |
+| 422 | `CLOSING_AMOUNT_OUT_OF_BOUNDS` | A counted Closing amount is below `minimum` or above `maximum` | No |
+| 500 | `IDEMPOTENCY_INVARIANT` | Server-side idempotency invariant broke; not an ordinary business branch | No |
 | 503 | `TEMPORARILY_UNAVAILABLE` | Dependency or worker unavailable, or a concurrent request holding this idempotency key did not complete | Yes |
+
+### Removed Codes
+
+- **Approved**: `SESSION_ALREADY_CLOSED` and `DOCUMENT_STATE_CONFLICT` were documented in
+  earlier drafts and never had a runtime producer. They are removed from v1. Android must
+  not define them. The states they described are reported by the codes that do exist:
+  a closed Opening returns `CLOSING_ALREADY_CLOSED` (Closing paths) or `NO_OPEN_SESSION`
+  (sale, return, and quote paths), and an ERPNext state conflict returns
+  `DOCUMENT_VALIDATION_FAILED`, `RETURN_LIMIT_EXCEEDED`, `CLOSING_IN_PROGRESS`, or
+  `CLOSING_RECOVERY_REQUIRES_MANAGER` depending on the flow.
+
+### Retryable Semantics
+
+- **Approved**: `error.retryable` is the only field Android reads to decide whether the
+  same request may be sent again. It is `true` for exactly `REQUEST_IN_PROGRESS` and
+  `TEMPORARILY_UNAVAILABLE`; every other code in the table is `false`.
+- **Approved**: A retryable mutation error must be retried with the **same**
+  `X-Idempotency-Key`. Both retryable codes carry `details.retry_after_seconds`, which is
+  the minimum wait. A new key for the same intent risks a duplicate document and is
+  prohibited.
+- **Approved**: `REQUEST_IN_PROGRESS` means a request under this key really is running, so
+  the outcome is still unknown. `TEMPORARILY_UNAVAILABLE` means the request that held this
+  key did not commit anything, so replaying the same key is safe.
+- **Approved**: A `retryable: false` code is final for that request body. Android may send
+  a new request only after the cashier changes the input, and then with a new key.
+- **Approved**: `IDEMPOTENCY_INVARIANT` is a server defect, not a cashier-actionable
+  branch. It is the only stable code returned with HTTP 500; every other HTTP 500 is a
+  native Frappe response with no `message.error` envelope. Android reports it as an
+  internal server error, never retries it automatically, and never maps it to a business
+  message.
+
+### Non-Error Stable Codes
+
+- **Approved**: These codes never appear in `message.error.code`. They are stable
+  enumeration values inside successful response bodies. Android freezes them together with
+  the error codes.
+
+| Code | Location | Meaning |
+| --- | --- | --- |
+| `STALE_OPENING` | `opening_session.warnings[].code` | The opening started on an earlier calendar day; informational only |
+| `MISSING_UOM_CONVERSION` | `warnings[].code` on `catalog.quote_item` and `catalog.scan` | The selected UOM has no conversion factor |
+| `CLOSING_FAILED` | `closing.failure.code` on `closing.submit`, `closing.status`, `closing.recover`, `sessions.current`, and `bootstrap.get` | Closing consolidation failed; a manager must review it in ERPNext |
+| `SOURCE_NOT_RETURNABLE` | `items[].returnability.rejection_reason` | The source is draft, cancelled, or itself a return |
+| `RETURN_LIMIT_REACHED` | `items[].returnability.rejection_reason` | The row has no remaining returnable quantity |
+| `NO_VALID_REFUND_MODE` | `items[].returnability.rejection_reason` | The source POS Profile has no valid refund mode |
+| `SERIAL_BATCH_REFERENCE_UNAVAILABLE` | `items[].returnability.rejection_reason` | The tracked row has no readable batch or serial reference |
+
+- **Approved**: `rejection_reason` is `null` when `returnability.eligible` is `true`.
+  Otherwise it holds exactly one of the four values above. A row that is not eligible is
+  not sent to `sales.quote_return` or `sales.create_return`.
 
 ### Error Detail Schemas
 
 | Code | Required `details` fields |
 | --- | --- |
-| `INVALID_REQUEST` | `field: string`, `reason: string` |
+| `INVALID_REQUEST` | `field: string`, `reason: string`. The single exception is the Closing submit rejection described under `closing.submit`, which carries only `reason: string` and HTTP 422 |
 | `PERMISSION_DENIED` | Empty object |
 | `PROFILE_SCOPE_MISMATCH` | `pos_profile: string` |
-| `RESOURCE_NOT_FOUND` | `resource_type: string`; optional `name: string` |
+| `RESOURCE_NOT_FOUND` | `resource_type: string` and `name: string` for catalog and Customer lookups; the sale lookups (`sales.get`, `sales.quote_return`, `sales.create_return`) return an empty object so an unauthorized name is not confirmed |
 | `IDEMPOTENCY_KEY_REUSED` | `endpoint: string` |
 | `SESSION_ALREADY_OPEN` | `opening_entry: string`, `pos_profile: string` |
-| `SESSION_ALREADY_CLOSED` | `opening_entry: string` |
-| `DOCUMENT_STATE_CONFLICT` | `doctype: string`, `name: string`, `state: string` |
 | `REQUEST_IN_PROGRESS` | `endpoint: string`, `retry_after_seconds: integer` |
+| `CLOSING_PREVIEW_STALE` | `pos_profile: string`, `opening_entry: string`, `current_preview_id: string`, `refresh_endpoint: "v1.closing.preview"` |
+| `CLOSING_IN_PROGRESS` | `pos_profile: string`, `opening_entry: string`, `closing_entry: string`, `closing_status: string`, `status_endpoint: "v1.closing.status"` |
+| `CLOSING_ALREADY_CLOSED` | `pos_profile: string`, `opening_entry: string`, `closing_entry: string`, `closing_status: string`, `status_endpoint: "v1.closing.status"` |
 | `CLOSING_RECOVERY_NOT_AVAILABLE` | `pos_profile: string`, `opening_entry: string` |
 | `CLOSING_RECOVERY_REQUIRES_MANAGER` | `pos_profile: string`, `opening_entry: string`, `reason: string` |
 | `NO_OPEN_SESSION` | `pos_profile: string` |
@@ -133,11 +196,18 @@
 | `PRICE_CHANGED` | `accepted_grand_total: decimal string`, `authoritative_grand_total: decimal string`, `currency: string`, `items: SaleItem[]`, `taxes: SaleTax[]` |
 | `INSUFFICIENT_STOCK` | `item_code: string`, `warehouse: string`, `requested_qty: decimal string`, `available_qty: decimal string` |
 | `INVALID_BATCH` | `item_code: string`, `batch_no: string`, `reason: string` |
-| `INVALID_SERIAL_NUMBER` | `item_code: string`, `serial_no: string or null`, `reason: string` |
-| `INVALID_PAYMENT` | `mode_of_payment: string or null`, `reason: string`; invalid return modes also include `allowed_refund_modes: string[]` |
+| `INVALID_SERIAL_NUMBER` | `item_code: string`, `serial_no: string or null`, `reason: string`; a partial serialized return also includes `source_item_row: string` |
+| `INVALID_PAYMENT` | `mode_of_payment: string or null`, `reason: string`; invalid return modes also include `allowed_refund_modes: string[]`; settlement mismatches also include `payable`/`received` decimal strings, and overpayment adds `change_amount: decimal string` |
 | `RETURN_LIMIT_EXCEEDED` | `source_name: string`, `source_item_row: string`, `requested_qty: decimal string`, `remaining_qty: decimal string`, `refresh_endpoint: "v1.sales.get"` |
-| `PROFILE_CONFIGURATION_INVALID` | `pos_profile: string`, `field: string`, `reason: string` |
+| `PROFILE_CONFIGURATION_INVALID` | `field: string`, `reason: string`; profile-scoped failures also include `pos_profile: string` |
 | `DOCUMENT_VALIDATION_FAILED` | `doctype: string`, `exception: string`, `display_message: string` |
+| `CLOSING_PAYMENT_MODE_UNKNOWN` | `field: "closing_balances"`, `reason: "unknown"`, `mode_of_payment: string`, `expected_modes: string[]` |
+| `CLOSING_PAYMENT_MODE_DUPLICATE` | `field: "closing_balances"`, `reason: "duplicate"`, `mode_of_payment: string`, `expected_modes: string[]` |
+| `CLOSING_PAYMENT_MODE_MISSING` | `field: "closing_balances"`, `reason: "missing"`, `mode_of_payment: string`, `expected_modes: string[]` |
+| `CLOSING_DECIMAL_MALFORMED` | `field: "closing_amount"`, `mode_of_payment: string`, `policy_version: string`, `reason: "malformed_decimal"` |
+| `CLOSING_DECIMAL_SCALE_EXCEEDED` | `field: "closing_amount"`, `mode_of_payment: string`, `policy_version: string`, `reason: "excessive_scale"`, `max_scale: integer` |
+| `CLOSING_AMOUNT_OUT_OF_BOUNDS` | `field: "closing_amount"`, `mode_of_payment: string`, `policy_version: string`, `reason: "below_minimum"` with `minimum` or `reason: "above_maximum"` with `maximum` |
+| `IDEMPOTENCY_INVARIANT` | Optional `endpoint: string` and `reference_doctype: string`; Android relies on no field |
 | `TEMPORARILY_UNAVAILABLE` | `retry_after_seconds: integer`; idempotency contention also includes `endpoint: string` |
 
 - **Proposed**: `details` is always an object. Clients ignore additive unknown fields but may rely on the required fields above.
@@ -821,6 +891,8 @@ Return quantity uses `return-quantity/v1`: an ASCII decimal-dot string, positive
 - **Approved**: The server persists Opening, expected, counted/closing, and difference for every mode plus invoice references, taxes, grand/net totals, quantity, and total taxes. It does not depend on Desk JavaScript.
 - **Approved**: The endpoint creates/submits through the existing Closing recovery executor and never directly calls merge-log creation helpers.
 - **Approved**: Closing commits its recovery phases (`Reserved`, `DraftCreated`, `SubmitStarted`) so a crashed request stays recoverable from the database alone. Once a phase is committed the response is derived from the persisted Closing state: a failure raised after the Closing Entry became durable returns that Closing (`queued`, `submitted`, or `failed`) instead of an error, and a retry with the same key replays the same Closing. A second Closing Entry is never created for the same Opening. A failure raised while nothing is durable yet keeps its documented rejection code, and an unrecognised failure with nothing durable stays a server error rather than being mapped to a business code.
+- **Approved**: A recognised ERPNext rejection of the persisted draft Closing (validation, permission, timestamp mismatch, mandatory field, or link validation) is stored as a durable `Rejected` envelope with HTTP 422 `INVALID_REQUEST` and `details.reason` carrying only the exception class name. This is the one `INVALID_REQUEST` that is not a client field error and is not HTTP 400. The same key replays that envelope; the Opening link is released so the cashier can build a fresh preview and submit with a new key.
+- **Approved**: The Closing paths never return `CLOSING_FAILED` as an error code. A durable Closing whose consolidation failed is a successful response carrying `closing.status = "failed"` and `closing.failure.code = "CLOSING_FAILED"`.
 
 ```json
 {
@@ -877,7 +949,35 @@ Return quantity uses `return-quantity/v1`: an ASCII decimal-dot string, positive
 - **Approved**: V1 has no mobile retry/cancel endpoint. A manager reviews failed consolidation or cancellation in ERPNext Desk.
 - **Approved**: Deferred consolidation (`>= 10` invoices) runs after the submission response is already committed. A failure there sets the Closing to `failed`, so Android learns about it by polling this endpoint; it never retroactively turns the committed submission response into an error.
 
-Stable Closing errors include `NO_OPEN_SESSION`, `CLOSING_PREVIEW_STALE`, `CLOSING_PAYMENT_MODE_UNKNOWN`, `CLOSING_PAYMENT_MODE_DUPLICATE`, `CLOSING_PAYMENT_MODE_MISSING`, `CLOSING_DECIMAL_MALFORMED`, `CLOSING_DECIMAL_SCALE_EXCEEDED`, `CLOSING_AMOUNT_OUT_OF_BOUNDS`, `CLOSING_IN_PROGRESS`, `CLOSING_ALREADY_CLOSED`, `PROFILE_SCOPE_MISMATCH`, and `PERMISSION_DENIED`.
+Stable Closing errors are exactly the codes marked in the main error table: `NO_OPEN_SESSION`,
+`CLOSING_PREVIEW_STALE`, `CLOSING_PAYMENT_MODE_UNKNOWN`, `CLOSING_PAYMENT_MODE_DUPLICATE`,
+`CLOSING_PAYMENT_MODE_MISSING`, `CLOSING_DECIMAL_MALFORMED`, `CLOSING_DECIMAL_SCALE_EXCEEDED`,
+`CLOSING_AMOUNT_OUT_OF_BOUNDS`, `CLOSING_IN_PROGRESS`, `CLOSING_ALREADY_CLOSED`,
+`CLOSING_RECOVERY_NOT_AVAILABLE`, `CLOSING_RECOVERY_REQUIRES_MANAGER`, `REQUEST_IN_PROGRESS`,
+`IDEMPOTENCY_KEY_REUSED`, `INVALID_REQUEST`, `PROFILE_CONFIGURATION_INVALID`,
+`PROFILE_SCOPE_MISMATCH`, and `PERMISSION_DENIED`. `CLOSING_FAILED` is not one of them: it is
+the `closing.failure.code` value inside a successful receipt.
+
+### Closing State Decision Table
+
+- **Approved**: Android never infers Closing state. Each response below determines exactly one
+  next action, so no client-side guessing is required.
+
+| Response | Meaning | Android next action |
+| --- | --- | --- |
+| `closing.status` = `queued` | Submitted and durable; consolidation still running | Poll `closing.status`; do not resubmit |
+| `closing.status` = `submitted` | Terminal success | Show receipt; the Opening is closed |
+| `closing.status` = `failed` with `failure.code` = `CLOSING_FAILED` | Durable but consolidation failed | Show manager-review message; no mobile retry exists |
+| `closing.status` = `draft` | Closing Entry exists but is not submitted | Resume with the same key, or `closing.recover` when the key is lost |
+| HTTP 409 `REQUEST_IN_PROGRESS` | A Closing request holds a live lease | Wait `retry_after_seconds`, retry the same key |
+| HTTP 409 `CLOSING_IN_PROGRESS` | A nonterminal Closing already holds this Opening | Poll `closing.status` with `details.closing_entry` |
+| HTTP 409 `CLOSING_ALREADY_CLOSED` | The Opening was already terminally closed | Read `closing.status` with `details.closing_entry`; open a new session |
+| HTTP 409 `CLOSING_PREVIEW_STALE` | The bound preview is outdated | Call `closing.preview` again and resubmit with a new key |
+| HTTP 409 `CLOSING_RECOVERY_NOT_AVAILABLE` | Nothing to recover | Return to normal selling |
+| HTTP 409 `CLOSING_RECOVERY_REQUIRES_MANAGER` | Ownership or state cannot be proven | Block the outlet and show manager-review with `details.reason` |
+| HTTP 422 `NO_OPEN_SESSION` | No open Opening for this profile | Open a session |
+| HTTP 422 `INVALID_REQUEST` with only `reason` | Closing submit was rejected before anything became durable | Show a rejection; the stored `Rejected` envelope replays for the same key |
+| HTTP 500 `IDEMPOTENCY_INVARIANT` | Server defect | Show an internal error; never auto-retry |
 
 ## Compatibility Rules
 
