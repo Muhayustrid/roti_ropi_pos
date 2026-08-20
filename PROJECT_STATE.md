@@ -1,7 +1,9 @@
 # PROJECT_STATE.md — AI session resume checkpoint
 
-**Last updated:** 2026-08-20, after the cross-Task 1-4 pre-commit audit closed two defects (preflight `final`-phase walk-in rule; `Promotion` permissions vs design §18).
-**Resume point:** Dynamic Promotion MVP implementation — Tasks 1-4 complete and audited. Awaiting commit approval, then Task 5 (return semantics) authorization. Mobile POS P0 remediation is complete and verified. See §11 and §12.
+**Last updated:** 2026-08-20, after Task 5 (return semantics) closed GREEN with mutation proof.
+**Resume point:** Dynamic Promotion MVP implementation — Tasks 1-4 committed (`7bf8dd9`), Task 5 complete
+and awaiting commit authorization. Next: Task 6 (reporting projection) authorization. Mobile POS P0
+remediation is complete and verified. See §11 and §12.
 
 The app-ownership extraction project (Phases 0-3) is complete; its record below stays as history.
 
@@ -1205,46 +1207,122 @@ OK, `test_module_transfer_patch` 11 OK, `test_sidebar_cleanup` 9 OK, `test_recov
 those same reports is now `ok=True`, confirming the failure is the recovery-map fixture and not this
 change. Ruff 0.14.10 check passed, format 67 files already formatted.
 
-**Awaiting commit approval.** Nothing from Tasks 1-4 is staged or committed yet — the whole Dynamic
-Promotion implementation is still working-tree state on branch
-`docs/dynamic-promotion-implementation-plan` (last commit `7984e2e`, docs only). Exact-path staging list
-for `selling_additional`:
+**Tasks 1-4 are committed.** `selling_additional` commit `7bf8dd9` ("feat: add Dynamic Promotion /
+Combo MVP (Tasks 1-4)") carries the promotion DocTypes, the `promotions/` package, the fixture and
+`hooks.py` changes, the preflight remediation, and every Task 1-4 test module, on branch
+`docs/dynamic-promotion-implementation-plan`. The audit remediation record for those tasks is committed
+in this repo as `de4db45`. Tool output (`.agents/`, `.claude/`, `.codegraph/`, `.superpowers/`,
+`.zcode/`, `skills-lock.json`) stayed excluded, as intended.
 
-Modified (Tasks 1 and 4, plus the audit remediation):
+### Task 5 / Return Semantics Evidence Summary
 
-```
-AGENTS.md
-CLAUDE.md
-docs/2026-08-18-dynamic-promotion-combo-implementation-plan.md
-selling_additional/hooks.py
-selling_additional/fixtures/custom_field.json
-selling_additional/migration/preflight.py
-selling_additional/tests/test_hooks.py
-selling_additional/tests/test_install_paths.py
-selling_additional/tests/test_migration.py
-selling_additional/tests/test_preflight.py
-selling_additional/tests/test_shell_contract.py
-```
+**Scope:** plan Task 5 — invariant I6, decision D11, gate G3's return half, plus G7 point 10.
 
-New (Tasks 1-4):
+**Production file:** `selling_additional/promotions/engine.py` only, `+121 −0`. No DocType JSON, fixture,
+`hooks.py`, `patches.txt`, permission, or core file changed. No migrate ran. No new whitelisted endpoint.
 
-```
-selling_additional/promotions/            (__init__.py, engine.py, eligibility.py, pricing.py, api.py)
-selling_additional/selling_additional/doctype/promotion/
-selling_additional/selling_additional/doctype/promotion_component/
-selling_additional/selling_additional/doctype/promotion_choice_group/
-selling_additional/selling_additional/doctype/promotion_option/
-selling_additional/selling_additional/doctype/promotion_outlet/
-selling_additional/selling_additional/doctype/pos_promotion_selection/
-selling_additional/tests/test_g1_model_c_spike.py
-selling_additional/tests/test_promotion_master.py
-selling_additional/tests/test_promotion_eligibility.py
-selling_additional/tests/test_promotion_pricing.py
-selling_additional/tests/test_promotion_contracts.py
-selling_additional/tests/test_promotion_expansion.py
-```
+**Implementation.** `_validate_return_completeness` plus its reader `_source_promotion_rows`. A return
+carrying promotion rows without `return_against` throws. Otherwise the guard rejects a promotion row that
+carries no instance id and a promotion row with positive quantity, then groups return rows by
+`(instance_id, item_code)`, compares each returned instance against the source invoice's own child rows,
+and throws when an instance is unknown to the source, when any item's quantity differs from what was
+sold, or when the return carries an item that instance never sold. Instances absent from the return are
+untouched — absent is as valid as complete. The sale-side instance cap is never consulted.
 
-Plus, in `roti_ropi_pos`, this checkpoint file. Deliberately excluded: `.agents/`, `.claude/`,
-`.codegraph/`, `.superpowers/`, `.zcode/`, `skills-lock.json` — tool output.
+**Ruling — the guard runs on `before_validate` only.** Hooks registered on `validate` run *after*
+`POSInvoice.validate` itself (`frappe/model/document.py:1403` runs the composed method and ERPNext's own
+body executes first inside it). An incomplete return therefore hit ERPNext's own
+`At least one item should be entered with negative quantity in return document` and
+`Paid amount + Write Off Amount can not be greater than Grand Total` before the engine ever saw the
+document, hiding the real reason from the cashier. `before_validate` runs before any of that
+(`document.py:1396-1397`) and is already this engine's materialization point. It is also not a
+submit-time gap: `run_before_save_methods` runs `before_validate` for `_action in ("save", "submit")`,
+so a draft that is later submitted re-enters the guard. `test_partial_return_is_blocked_at_submit_too`
+pins exactly that — a complete draft is inserted, a component is then removed, and `submit()` throws the
+named error with the document left at `docstatus 0`. A second call at `before_submit` would cover the
+same condition and pin nothing, so the guard deliberately has one call site. Measured, not assumed: with
+the guard on `validate` the suite reported the two ERPNext messages instead of the named errors.
+
+**Ruling — promotion rows on a return are selected on instance *or* role.** Selecting on the instance
+field alone let a crafted row carrying only the role slip past this guard; it was still rejected, but by
+`_validate_promotion_row_integrity` on `validate`, which is behind ERPNext's own return errors — the very
+masking the placement above avoids. The guard now selects on either field and throws its own named error
+for a promotion row with no instance id.
+
+**Ruling — the sign is checked, not absorbed.** An earlier version accumulated `abs(flt(row.qty))`, so a
+positive component row satisfied the returned quantity of a negative one; only ERPNext's later
+`validate_return_items_qty` stopped the document, after the guard had already approved it. The guard now
+throws on any promotion row with `qty > 0` and accumulates the plain sign flip.
+
+**Ruling — completeness is measured from the source child table, not the source document.**
+`_source_promotion_rows` reads `tabPOS Invoice Item` filtered by parent and a set instance field. A
+controller default or a later amendment of the source document cannot then change what completeness is
+compared against. The instance filter narrows the read and is documented in source as not being a guard.
+
+**Stock and refund reversal stay native.** No custom reversal code exists. The pass-path test asserts the
+negated component demand on the return rows (`bread_a −2`, `bread_b −1`) and that the parent item is
+non-stock, so it contributes no stock movement; the consolidated Stock Ledger Entry evidence for the same
+path is `test_g1_model_c_spike` point 11, still 7 OK.
+
+**RED → GREEN.** `selling_additional/tests/test_promotion_returns.py`, 19 tests. First run: 14 errors,
+all fixture faults (one POS Opening Entry per invoice is rejected — `<profile> is open`; a manually built
+return needs `paid_amount` set, otherwise `validate_change_amount` raises `TypeError` on `None`). After
+the fixtures were correct, 4 genuine failures drove the placement ruling above and one test-only
+correction: mapped child rows from `make_sales_return` are unsaved and share an empty `name`, so the
+"drop one component" test selects by object identity, not by name. An independent review then added four
+tests (role-only row, positive quantity, zero quantity, blocked-at-submit) and widened the
+source-untouched test to cover `modified`, the source item rows, and the invoice totals rather than the
+selection table alone. GREEN twice consecutively: 19 OK in 38.389s and 37.047s.
+
+**Mutation ledger — 12 mutations, engine restored and verified byte-identical after each:**
+
+| Mutation | Failing test(s) |
+| --- | --- |
+| guard call removed from `on_before_validate` | all 11 fail-path tests |
+| `is_return` early return removed | 17 errors (guard runs on ordinary sales) |
+| no-promotion-rows early return removed | `test_standalone_return_without_promotion_rows_is_allowed` |
+| row selection narrowed to instance-only | `test_return_row_carrying_only_a_role_throws_the_return_error` |
+| standalone-return throw | `test_standalone_return_with_promotion_rows_throws`, `..._carrying_its_own_selections_still_throws` |
+| missing-instance throw | `test_return_row_carrying_only_a_role_throws_the_return_error` |
+| positive-quantity throw | `test_positive_promotion_row_cannot_stand_in_for_returned_quantity` |
+| unknown-instance throw | `test_return_row_for_instance_absent_from_source_throws` |
+| quantity-mismatch throw | 5 tests: 3 partial-return, zero-quantity, blocked-at-submit |
+| extra-item throw | `test_return_carrying_an_item_never_sold_under_the_instance_throws` |
+| sign flip reverted to `abs()` | **survived** — equivalent expression, not a guard |
+| source-row instance filter removed | **survived** — narrows the read, not a guard |
+
+The two survivors are deliberate and documented in `engine.py`: with the positive-quantity throw in
+place, `- flt(row.qty)` and `abs(flt(row.qty))` are the same value, and dropping the source filter only
+adds an entry keyed on the empty instance that no returned instance can match. Reporting them as
+survivors rather than adding tests that pin an equivalence is the honest outcome. Earlier doc text
+claiming "6 mutations each killing exactly their own guard" overstated isolation and has been corrected.
+
+**Adjacent regressions on `promo-mvp.localhost`, all GREEN:** `test_promotion_expansion` 27,
+`test_g1_model_c_spike` 7, `test_promotion_master` 36, `test_promotion_eligibility` 17,
+`test_promotion_pricing` 13, `test_promotion_contracts` 5, `test_hooks` 5, `test_shell_contract` 1+7,
+`test_install_paths` 10, `test_walk_in` 10.
+
+**Pre-existing, not caused by Task 5:** `test_preflight` 42 tests / 4 failures — three
+`TestProfileRecovery` cases and `test_missing_walk_in_blocks_on_legacy_site`, the same site-fixture gap
+recorded above. Proved baseline by restoring `engine.py` to its committed `7bf8dd9` content and
+re-running: identical 4 failures with and without the Task 5 change.
+
+**Site hygiene.** `POS Settings.invoice_type` is a Single, and `set_single_value` also clears a document
+cache that `frappe.db.rollback` cannot undo, so the test module now records the previous value and
+restores it via `addCleanup`. Verified after a full run: the site still reads `Sales Invoice`, its
+original value.
+
+**Static checks:** `uvx ruff@0.14.10 check selling_additional` all passed; `format --check` 68 files
+already formatted.
+
+**Reviewed independently before commit.** A separate adversarial review read the full diff, the whole
+test module, and the relevant installed Frappe and ERPNext source. It found no path to `docstatus 1`
+that bypasses the guard, confirmed the cap is never re-checked by reading rather than by test, and
+confirmed `["is", "set"]` excludes empty strings in this Frappe version. Its two Should-fix findings —
+the role-only row selection and the `abs()` sign weakness — are both fixed above with a test each. It
+also judged the `_repay` test helper legitimate rather than defect-masking: `make_return_doc` negates the
+source's full payment, so a deliberately reduced return must restate the refund, and having the engine
+restate it would silently change money on an operator's document.
+
 
 
