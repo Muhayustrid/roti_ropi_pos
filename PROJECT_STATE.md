@@ -1,12 +1,7 @@
 # PROJECT_STATE.md — AI session resume checkpoint
 
-**Last updated:** 2026-08-19, after P0-7 (audit finding I-16) went green on the four-app site and was
-committed.
-**Resume point:** Mobile POS backend readiness remediation, P0 only, from
-`docs/mobile-pos/backend-readiness-audit.md`. P0-1 through P0-7 are complete, mutation-verified, and
-committed; all 15 Mobile POS modules (370 tests) are green on `selling-cutover.localhost`, the only site
-carrying all four owned apps. Nothing in the P0 scope is outstanding. Remaining audit findings are P1/P2
-and out of this workstream's scope. See §11.
+**Last updated:** 2026-08-20, after the cross-Task 1-4 pre-commit audit closed two defects (preflight `final`-phase walk-in rule; `Promotion` permissions vs design §18).
+**Resume point:** Dynamic Promotion MVP implementation — Tasks 1-4 complete and audited. Awaiting commit approval, then Task 5 (return semantics) authorization. Mobile POS P0 remediation is complete and verified. See §11 and §12.
 
 The app-ownership extraction project (Phases 0-3) is complete; its record below stays as history.
 
@@ -979,3 +974,277 @@ confirms the four-app site is the one supplying real coverage.
 
 The server remains authoritative for price, tax, grand total, payable, return amount, and closing values.
 Ruff 0.14.10 check and format clean, `git diff --check` clean.
+
+---
+
+## 12. Active workstream — Dynamic Promotion / Combo MVP (selling_additional)
+
+**Authorities:**
+- Design authority: `apps/selling_additional/docs/2026-08-18-dynamic-promotion-combo-design.md`
+- Plan authority: `apps/selling_additional/docs/2026-08-18-dynamic-promotion-combo-implementation-plan.md` (commit `7984e2e`)
+- Dedicated test site: `promo-mvp.localhost` (Installed apps: `frappe`, `erpnext`, `selling_additional` only).
+
+**Gate G1 (Model C Spike) Status:** **G1 PASS**. **Gates G2 and G7 (Task 4): PASS.**
+
+### Task 1 / G1 Evidence Summary (compressed — Task 4 has superseded this engine):
+
+G1 PASS on `promo-mvp.localhost`: 12/12 Model C proof points, 4/4 framework measurements, 3 mutation
+checks, rollback Cases A and B, and static analysis all GREEN, twice consecutively. Preflight
+confirmed A11 (`required_apps = ["erpnext"]`, zero foreign-app imports) and all 7 candidate DocType
+names CLEAR. Scaffolding created 6 DocTypes, 4 Custom Fields, and the minimal engine.
+
+The four measurements are the load-bearing record and remain encoded as live assertions in
+`selling_additional/tests/test_promotion_expansion.py`'s sibling module
+`selling_additional/tests/test_g1_model_c_spike.py`:
+
+1. `before_validate` must materialize before `AccountsController.validate`, otherwise
+   `set_total_in_words()` raises `abs(None)`.
+2. POS price-list rewrites do reach promotion rows, so engine re-assertion is mandatory.
+3. POS closing consolidation copies `0.0` rates and amounts verbatim to the Sales Invoice.
+4. `make_sales_return` copies the promotion role and instance Custom Fields to return rows.
+
+Full point-by-point evidence: `docs/2026-08-18-dynamic-promotion-combo-implementation-plan.md` §5 and
+the `test_g1_model_c_spike.py` assertions themselves.
+
+### Task 2 / Promotion Master Validations Evidence Summary (selling_additional):
+
+- **Scope:** Promotion master contract (design section 4.1, plan Task 2): I11, I12, D3-D5, D12, D15, D19, and A6/A7/A9 fence checks, plus lifecycle (D15/D3) and the tax-template advisory (frozen decision 1). All validations live in the parent `Promotion` controller — measured framework behaviour (frappe/model/document.py: `db_insert`/`db_update` for children, no child hooks on parent save), so child controllers carry no validation. `group_key` is generated once in `_ensure_group_keys()` (idempotent, never regenerated on re-save) and child-type controllers exist only as pass-throughs with documented rationale.
+- **Production files:** `selling_additional/selling_additional/doctype/promotion/promotion.py` (full `validate`/`on_trash` per plan items 1-7); `selling_additional/selling_additional/doctype/promotion_choice_group/promotion_choice_group.py` plus `promotion_component`/`promotion_option`/`promotion_outlet` (pass-through with dead-code removal and measured-behaviour comment). `promotion_choice_group.json` `group_key` stays `read_only=1` with server fill.
+- **RED -> GREEN (Task 2 site `promo-mvp.localhost`):**
+  - `bench --site promo-mvp.localhost run-tests --module selling_additional.tests.test_promotion_master` first RED: 27 failures (`ValidationError not raised` for every guard) + 9 positive controls GREEN; 2 tax-template tests initially errored via non-Tax `Debtors` account (Receivable) — fixture fixed to query `account_type in {Tax, Chargeable, Income Account, Expense Account, Expenses Included In Valuation}`. Warehouse fixture fixed to return `doc.name` (autoname appends `- ABBR`). Buying `Item Price` fixture fixed to use a buying Price List (`Standard Buying`, `buying=1`), because `ItemPrice.update_price_list_details()` overwrites `buying`/`selling` from the Price List.
+  - GREEN after `promotion.py` fix: **Ran 36 tests in 37.484s OK** (second run 36.888s OK, third confirm 37.115s OK). 36-test module: 27 guard tests, 8 positive controls, 1 lifecycle - `test_referenced_promotion_delete_is_blocked` / `test_label_edit_preserves_group_key_and_selection_snapshots`.
+- **Mutation / guard pairing (representative, each exactly one failure when its guard is disabled):** base_price, duplicate `group_key`, `pick_count`, `valid_from > valid_to`, `max_instances_per_invoice < 0`, component/option stock/sellable/batch/serial, component qty>0 and whole-number, adjusted total >=0, parent stock/sellable/fixed-asset/selling-Item-Price, at-most-one enabled promotion per `parent_item`, duplicate outlet identity `(company,warehouse)`, `Warehouse.company` ownership, nested-set `lft/rgt` root-company fence, currency uniformity, and `on_trash` submitted-selection block. `ItemPrice` selling lookup is conservative (`selling=1` anywhere, regardless of `valid_upto`).
+- **Adjacent regressions on `promo-mvp.localhost` (all GREEN, no production regression):**
+  - `test_g1_model_c_spike` 7 OK (fixture updated to a single valid save: `group_key` supplied up-front with 3 options, satisfying the Task 2 `>=2 options` guard — the former two-step group-then-options flow would now fail).
+  - `test_walk_in` 10 OK, `test_hooks` 5 OK, `uvx ruff check .` and `uvx ruff format --check .` clean.
+
+### Task 3 / Eligibility and Pricing Domain Evidence Summary:
+
+31 tests GREEN on `promo-mvp.localhost`: `test_promotion_eligibility` 17, `test_promotion_pricing` 13,
+`test_promotion_contracts` 1 (AST scan proving zero `@frappe.whitelist()` anywhere in
+`selling_additional/promotions/`). Covers every fail-closed eligibility dimension, `resolve_outlet_context`,
+quote math, and parent/component row descriptors. `max_instances_per_invoice` is deliberately not an
+eligibility dimension — enforcement belongs to Task 4.
+
+Production files: `selling_additional/promotions/eligibility.py`, `pricing.py`, `api.py`.
+
+### Task 4 / POS Invoice Expansion and Enforcement Evidence Summary:
+
+**Scope:** plan Task 4 — I1, I2, I8, I13, I15, I16 and gates G2, G7. The engine was rewritten onto the
+Task 3 contracts: `eligibility.resolve_outlet_context` is now the only warehouse source (D14),
+`eligibility.check` gates every Promotion named by a payload, and `pricing.quote` computes the total and
+the row descriptors. No inline duplicate of either domain remains.
+
+**Production file:** `selling_additional/promotions/engine.py` only. No DocType JSON, fixture, `hooks.py`,
+`patches.txt`, or core file changed. No migrate ran.
+
+**Ruling — I3 immutability is framework-enforced, not re-implemented.** All four promotion Custom Fields
+carry `allow_on_submit = 0`, so Frappe's own `validate_update_after_submit`
+(`frappe/model/document.py`) raises `UpdateAfterSubmitError` on any post-submit change to a promotion
+field, row, or selection. A second engine-side guard would cover the same condition and pin neither, so
+the engine deliberately carries none; the two immutability tests assert `UpdateAfterSubmitError` and then
+re-read the stored value from the database.
+
+**Ruling — I15 is row-driven, not selection-driven.** `_validate_promotion_row_integrity` judges the item
+rows present on the document, never the selection table. Judging selections would reject a return that
+legitimately carries a subset of rows; return completeness is Task 5's rule.
+
+**RED → GREEN.** First run: `Ran 20 tests FAILED (errors=20)`, all fixture faults, then 8 genuine
+implementation failures once the fixtures were correct. Four fixture faults, all fixed in test code only:
+
+1. No `Fiscal Year` for 2026 on this site → `FiscalYearError` on the `Stock Entry` submit. Fixed the same
+   way `test_g1_model_c_spike` and `test_promotion_master` already do.
+2. `POSInvoice.validate` requires an open `POS Opening Entry` even for a draft insert
+   (`erpnext/accounts/doctype/pos_invoice/pos_invoice.py:210`), so the shift is now opened in `setUp`.
+3. `POS Settings.invoice_type` was `Sales Invoice`, which rejects a POS Invoice outright. Pinned to
+   `POS Invoice`.
+4. ERPNext raises `PartialPaymentValidationError` when `paid_amount` is below the total, so the new
+   `_submit_paid` helper sets the payment row from the server-calculated `grand_total` rather than a
+   hardcoded number.
+
+**GREEN:** `Ran 27 tests OK`, twice consecutively (48.795s, 49.293s). The module grew 20 → 27: seven new
+guard tests were added because seven engine guards had no independent test.
+
+**Mutation ledger — 13 mutations, each guard independently killed, every one restored:**
+
+| Guard disabled | Failing test(s) |
+| --- | --- |
+| instance cap (`cap > 0 and requested > cap`) | 6 cap tests fail |
+| backing-selection check | `test_bare_parent_with_role_but_no_selection_fails`, `test_manual_duplicate_rows_cannot_bypass_selection_count` |
+| bare-parent-item check | `test_bare_parent_row_fails_closed` |
+| I8 second-payload check | `test_second_payload_on_draft_with_selections_fails_closed`, `..._g7_point_11` |
+| parent rate re-assertion | `test_parent_rate_reassertion_after_manual_rewrite` |
+| component zero-rate re-assertion | `test_component_zero_rate_reassertion_after_manual_rewrite` |
+| warehouse re-assertion | `test_warehouse_reassertion_after_manual_change` |
+| instance-and-role pairing | `test_promotion_row_with_instance_but_no_role_fails` |
+| duplicate-parent-per-instance | `test_duplicate_parent_row_for_one_instance_fails` |
+| unknown-role rejection | `test_unknown_promotion_role_fails` |
+| parent-without-components | `test_parent_instance_without_component_rows_fails` |
+| eligibility gate | `test_disabled_promotion_in_payload_is_rejected`, `test_promotion_without_an_enabled_outlet_row_is_rejected` |
+| pending-payload clear | 17 errors (infinite re-expansion) |
+
+The eligibility-gate mutation initially survived — the suite passed with the gate disabled. That gap was
+closed by adding the two tests above, and the mutation was re-run and confirmed killing.
+
+**Measured framework behaviour worth not rediscovering.** At `before_validate` the POS Invoice's own
+`currency` still holds the field default (`INR` on this site), because ERPNext rewrites it from the POS
+Profile later in its own `set_missing_values`. Reading `doc.currency` there compared the promotion
+against a currency the transaction never uses and broke `test_g1_model_c_spike` and
+`test_promotion_master`. `_resolve_transaction_currency` now reads the POS Profile, then the outlet
+Company, and never the half-built document.
+
+**Test-pin updates required by Task 1's fixture growth (test code only, no production change).** Four
+modules pinned the fixture at exactly six Custom Fields and the POS Invoice `validate` hook at exactly
+one handler. Task 1 legitimately made both false; these were failing before this session's work and are
+now corrected to the current owned set:
+
+- `test_install_paths.py`: `SIX_FIELD_NAMES` → `OWNED_FIELD_NAMES` (10 entries, promotion fields appended
+  after the six cutover identities); `test_hooks_resolve_solely_to_targets` now asserts the walk-in
+  handler stays **first** on POS Invoice with the promotion handler appended after it.
+- `test_migration.py`: fixture length 6 → 10, with the first six names still order-pinned and the two
+  walk-in objects still byte-compared against the recorded bakery records.
+- `test_preflight.py`: same rename; `collect_custom_fields` derives its expectation from the fixture file,
+  so the test tuple had to follow it.
+- `test_shell_contract.py`: `doc_events` and `fixtures` expectations updated to the current shape.
+
+**Adjacent regressions on `promo-mvp.localhost`, twice each, all GREEN:** `test_promotion_expansion` 27,
+`test_g1_model_c_spike` 7, `test_promotion_master` 36, `test_promotion_eligibility` 17,
+`test_promotion_pricing` 13, `test_promotion_contracts` 1, `test_hooks` 5, `test_walk_in` 10,
+`test_walk_in_asset` 12, `test_navigation` 7, `test_shell_contract` 7+1, `test_install_paths` 10,
+`test_checksums` 6, `test_module_transfer_patch` 11, `test_sidebar_cleanup` 9,
+`test_recovery_map_digest` 8.
+
+**Pre-existing failures on this site, proved baseline by neutralizing all three promotion hooks and
+re-running — identical failure sets with the engine on and off. Not regressions, not this task's to
+fix:**
+
+- `test_past_orders` 7 errors — `FiscalYearError` for `_Test Selling Company`; this site has no Fiscal
+  Year and the module's fixture does not create one.
+- `test_price_group_lifecycle` 1 error — `Abbreviation already used for another company`, accumulated
+  site residue.
+- `test_price_group_concurrency` 1 error — `LinkValidationError: Could not find Company: _Test Selling
+  Company`, missing site fixture.
+- `test_migration` 5 errors — `preflight.check(phase="post_model_sync")` fails its `profile_recovery`
+  section: the recovery map names a Price List that does not exist on this site (this site has **zero**
+  Price List rows).
+- `test_preflight` 4 failures — three `TestProfileRecovery` cases and
+  `test_missing_walk_in_blocks_on_legacy_site`, both rooted in the same missing site fixtures
+  (`Standard Selling` absent; `bakery_manufacturing` not installed here, so the legacy-site branch cannot
+  fire). `test_preflight` improved 5 → 4 because the field-tuple correction fixed one of them.
+
+`promo-mvp.localhost` carries only `frappe`, `erpnext`, `selling_additional`, so any assertion needing
+`bakery_manufacturing` or the cutover site's business fixtures cannot pass here by construction. The
+Phase 2 baseline for those modules is `selling-cutover.localhost`.
+
+**Static checks:** `uvx ruff@0.14.10 check selling_additional` all passed; `format --check` 67 files
+already formatted; `git diff --check` clean. `apps/frappe` and `apps/erpnext` carry no feature diff
+(ERPNext keeps only its known `banking/yarn.lock` edit); `roti_ropi_pos` untouched apart from this
+checkpoint; `patches.txt` byte-identical.
+
+### Cross-Task Audit Remediation (Tasks 1-4, 2026-08-20)
+
+A pre-commit audit across Tasks 1-4 found two real defects. Both are fixed, RED-first, with mutation
+proof. Nothing else changed.
+
+**A. Preflight `final` phase rejected a legitimate registration.**
+`collect_hook_owners("final")` asserted `paths == [WALK_IN_SELLING]` over every provider on
+`doc_events[<dt>]["validate"]`. Task 1 appended `promotions.engine.on_validate` to POS Invoice
+`validate`, so the rule read the engine as a second walk-in provider and returned `ok=False`.
+Measured `False` on `promo-mvp.localhost`, `selling-cutover.localhost`, and the live
+`development.localhost`; `pre_model_sync` and `post_model_sync` were unaffected. This is
+operator-facing: `AGENTS.md` treats `preflight.check()` as a bench-invokable interface used by the
+rollout runbook, and design §17 assumed preflight was untouched by the MVP.
+
+Fix: `preflight.NON_WALK_IN_VALIDATE_PROVIDERS` lists the exact `(app, path)` pairs this app
+deliberately registers on the shared `validate` event; the collector routes those into a separate
+`other_validate_providers` bucket and leaves the walk-in assertion otherwise unchanged. Any pair not
+listed — a foreign app's handler, or a missing walk-in registration — still counts and still blocks,
+so the rule stays fail-closed.
+
+Three tests, each killed by its own mutation and by no other:
+- `test_final_passes_against_real_registrations` — real hooks, no mock. The existing
+  `test_final_requires_single_walk_in_provider` patches `frappe.get_hooks`, which is precisely why it
+  could not catch this.
+- `test_final_ignores_a_non_walk_in_provider_on_the_same_event` — mocked equivalent.
+- `test_final_requires_the_walk_in_provider_to_be_present` — pins the presence half of the
+  assertion, which the filter could otherwise have weakened silently.
+
+Mutations: removing the exclusion filter failed exactly the two allow-tests (2 → 6 failures);
+relaxing `paths != [WALK_IN_SELLING]` to `len(paths) > 1` failed exactly the presence test.
+
+Phase results after the fix, all three phases `ok=True` with empty problems, on all three sites:
+`promo-mvp.localhost`, `selling-cutover.localhost`, `development.localhost` (read-only console call,
+no writes).
+
+**B. `Promotion` permissions did not match design §18.**
+`promotion.json` shipped one permission row (`System Manager`). Design §18 requires create/write for
+**System Manager** and **Sales Manager** and read for **Sales User**, with no cashier role. No task
+in the implementation plan owns §18, so this was unallocated rather than deferred.
+
+Fix: two permission rows added; `Promotion` is not submittable (`is_submittable = 0`), so no submit
+permission is expressible and none was invented. Delete stays System-Manager-only. `modified` bumped
+`2026-08-19` → `2026-08-20`, keeping this app's stamp newest. Child tables keep zero permission rows
+and inherit the parent's.
+
+`test_promotion_contracts` grew 1 → 5 tests: JSON role set and per-right values, no-extra-role,
+child tables carry no permission rows, and the live `DocPerm` rows on the site (so a JSON that never
+synced still fails). Mutations: JSON role swap `Sales User` → `Accounts User` failed the JSON and
+extra-role tests; a stale-database condition (correct JSON, DB left at `Sales Manager.write = 0`)
+failed only the live test; a permission row added to `promotion_outlet.json` failed only the child
+test. `bench --site promo-mvp.localhost execute frappe.reload_doc` synced the definition on the
+dedicated test site only — no migrate, and no write to any other site.
+
+**Verification after both fixes** (`promo-mvp.localhost`, changed modules twice each):
+`test_promotion_contracts` 5 OK ×2, `test_preflight` 42 tests / 4 pre-existing failures ×2 (was 4
+before these fixes too — the two new hook-owner failures are gone), `test_promotion_master` 36 OK,
+`test_promotion_eligibility` 17 OK, `test_promotion_pricing` 13 OK, `test_promotion_expansion` 27 OK,
+`test_g1_model_c_spike` 7 OK, `test_hooks` 5 OK, `test_shell_contract` 7+1 OK, `test_install_paths`
+10 OK, `test_walk_in` 10 OK, `test_walk_in_asset` 12 OK, `test_navigation` 7 OK, `test_checksums` 6
+OK, `test_module_transfer_patch` 11 OK, `test_sidebar_cleanup` 9 OK, `test_recovery_map_digest` 8 OK.
+`test_migration` keeps its 5 pre-existing `profile_recovery` errors; the `hook_owners` section inside
+those same reports is now `ok=True`, confirming the failure is the recovery-map fixture and not this
+change. Ruff 0.14.10 check passed, format 67 files already formatted.
+
+**Awaiting commit approval.** Nothing from Tasks 1-4 is staged or committed yet — the whole Dynamic
+Promotion implementation is still working-tree state on branch
+`docs/dynamic-promotion-implementation-plan` (last commit `7984e2e`, docs only). Exact-path staging list
+for `selling_additional`:
+
+Modified (Tasks 1 and 4, plus the audit remediation):
+
+```
+AGENTS.md
+CLAUDE.md
+docs/2026-08-18-dynamic-promotion-combo-implementation-plan.md
+selling_additional/hooks.py
+selling_additional/fixtures/custom_field.json
+selling_additional/migration/preflight.py
+selling_additional/tests/test_hooks.py
+selling_additional/tests/test_install_paths.py
+selling_additional/tests/test_migration.py
+selling_additional/tests/test_preflight.py
+selling_additional/tests/test_shell_contract.py
+```
+
+New (Tasks 1-4):
+
+```
+selling_additional/promotions/            (__init__.py, engine.py, eligibility.py, pricing.py, api.py)
+selling_additional/selling_additional/doctype/promotion/
+selling_additional/selling_additional/doctype/promotion_component/
+selling_additional/selling_additional/doctype/promotion_choice_group/
+selling_additional/selling_additional/doctype/promotion_option/
+selling_additional/selling_additional/doctype/promotion_outlet/
+selling_additional/selling_additional/doctype/pos_promotion_selection/
+selling_additional/tests/test_g1_model_c_spike.py
+selling_additional/tests/test_promotion_master.py
+selling_additional/tests/test_promotion_eligibility.py
+selling_additional/tests/test_promotion_pricing.py
+selling_additional/tests/test_promotion_contracts.py
+selling_additional/tests/test_promotion_expansion.py
+```
+
+Plus, in `roti_ropi_pos`, this checkpoint file. Deliberately excluded: `.agents/`, `.claude/`,
+`.codegraph/`, `.superpowers/`, `.zcode/`, `skills-lock.json` — tool output.
+
+
