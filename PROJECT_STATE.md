@@ -1,9 +1,15 @@
 # PROJECT_STATE.md — AI session resume checkpoint
 
-**Last updated:** 2026-08-20, after Task 5 (return semantics) closed GREEN with mutation proof.
-**Resume point:** Dynamic Promotion MVP implementation — Tasks 1-4 committed (`7bf8dd9`), Task 5 complete
-and awaiting commit authorization. Next: Task 6 (reporting projection) authorization. Mobile POS P0
-remediation is complete and verified. See §11 and §12.
+**Last updated:** 2026-08-22, Task 6 (reporting projection) implementation complete on
+`promo-mvp.localhost`; awaiting commit authorization for the Task 6 files.
+**Resume point:** Dynamic Promotion MVP — Tasks 1-4 committed (`7bf8dd9`), Task 5 committed
+(`6bc4cf3`, "feat: enforce complete-or-absent promotion returns (Task 5)"; the earlier "awaiting
+commit" note in this file was stale — git wins). Task 6 (reporting projection) is implemented,
+migrated, and verified; its working-tree changes await one commit authorization. Task 6's migrate
+already ran on `promo-mvp.localhost` (authorized 2026-08-22, backup
+`private/backups/20260822_175120-promo-mvp_localhost-database.sql.gz`). Next: Task 7 (hardening and
+release gates) per the implementation plan. Mobile POS P0 remediation is complete and verified. See
+§11 and §12.
 
 The app-ownership extraction project (Phases 0-3) is complete; its record below stays as history.
 
@@ -1323,6 +1329,93 @@ the role-only row selection and the `abs()` sign weakness — are both fixed abo
 also judged the `_repay` test helper legitimate rather than defect-masking: `make_return_doc` negates the
 source's full payment, so a deliberately reduced return must restate the refund, and having the engine
 restate it would silently change money on an operator's document.
+
+### Task 6 / Reporting Projection Evidence Summary
+
+**Scope:** plan Task 6 — design §11 (D16), invariant I14, gate G5. The paused-session handoff record
+(`.superpowers/sdd/2026-08-14-selling-additional-cutover/promo-task6-facts-handoff.md`) drove the
+implementation; none of its investigation was repeated.
+
+**Production files:** new `selling_additional/doctype/promotion_selection_fact/` (DocType JSON,
+pass-through controller, `__init__`), new `promotions/facts.py`, `hooks.py` (+2 lines: POS Invoice
+`on_submit`/`on_cancel` → `promotions.facts`). Both `doc_events` pinning tests (`test_hooks.py`,
+`test_shell_contract.py`) updated in the same change. New `tests/test_promotion_facts.py` (15 tests).
+No patch registered; `patches.txt` byte-identical. The DocType arrives via model sync only.
+
+**Measured ruling — reported disagreement with design §11's literal return-side SQL.** A mapped
+return (`make_sales_return`) copies EVERY `POS Promotion Selection` row (`no_copy = 0`), so a return
+repaying one instance out of two still carries both selections; §11's "same join restricted to
+`is_return = 1`" counts 2 and refunds 43,000 where the truth is 1 and 20,000 (measured in the paused
+session). Correctness wins: instance presence is derived from the document's promotion item rows,
+and every return-side figure comes from the fact/parent-row data, never the copied selection table.
+The disagreement is documented in `facts.py`'s module docstring and was reported to the operator.
+
+**Encoded rulings in `facts.py`.** Per-line descriptors come from the selection snapshot (rows cannot
+express the fixed-vs-option split — one Item may be both in one instance, two invoice lines, no kind
+marker); `qty`/`promotion_total` negated iff `is_return` (magnitude from snapshot, exactness
+guaranteed by the Task 5 guard); `price_adjustment` is a unit-price attribute, never negated;
+`item_name` live Item lookup for every line (uniform rule; snapshot carries it only for options);
+`warehouse` from the instance's component rows (uniform by I13); identity is `autoname: "hash"`
+because no deterministic composite key survives the fixed+option overlap — tests compare by canonical
+semantic equality. Reporting helpers normalize the return side to a positive magnitude with
+`net = gross − returned`. `standalone_split()` reads `tabPOS Invoice Item` directly (empty instance
+vs role `Promotion Component`, `docstatus = 1`) and omits zero-zero items — promotion parents are in
+neither bucket. Permissions per design §18: exactly System Manager / Sales Manager / Sales User with
+read+report only, nobody create/write; rows are written by `insert(ignore_permissions=True)` from
+doc-events/system code only.
+
+**RED → GREEN.** First module run (pre-migrate): 15 tests — 12 errors (`tabPromotion Selection Fact`
+doesn't exist), 1 failure (live DocPerm absent), 2 contract tests GREEN by design. After the authorized
+migrate (backup first, path above): GREEN, and GREEN again on the second consecutive run; further
+GREEN runs after each later edit. Two test-code corrections on the way: `get_all` returns
+`posting_date` as a `date` object while the document carries the string (normalize with `getdate`;
+the canonical string projection was never affected), and the standalone split omits items whose both
+buckets sum to zero (pinned by test).
+
+**Mutation ledger — 18 mutations, 17 killed, every restore verified byte-identical by sha256:**
+
+| Mutation | Failing test(s) |
+| --- | --- |
+| on_cancel delete removed | 3 cancel/exclusion tests + rebuild |
+| return sign removed (`sign = 1.0`) | 6: signed facts, adjustment-not-negated, revenue/outlet/itemqty/optionfreq |
+| `return_against` dropped | signed-facts test |
+| `promotion_total` not negated | signed facts, adjustment, revenue, outlet |
+| presence from selections union (finding-2 guard) | 7 incl. units and rebuild |
+| rebuild `docstatus` filter removed | rebuild test |
+| units / revenue / outlet `DISTINCT` removed | each own query test (+exclusion for units/revenue) |
+| option `kind` filter removed | option-frequency test |
+| standalone role filter / instance filter removed | standalone-split test |
+| `on_submit` hook registration removed (hooks.py) | 9 failures + 2 errors |
+| `price_adjustment` negated | adjustment-not-negated test |
+| item/units/revenue `is_return` returned-split removed | each own query test |
+| `_project` delete-first removed | **survived** — documented in source as untestable defense-in-depth |
+
+M9/M10 were first killed via SQL parameter errors; both were re-run with parameter-preserving
+mutations and killed by their assertions instead.
+
+**Adjacent regressions on `promo-mvp.localhost`, all GREEN:** `test_promotion_facts` 15 (×2),
+`test_promotion_returns` 19, `test_promotion_expansion` 27, `test_g1_model_c_spike` 7,
+`test_promotion_master` 36, `test_promotion_eligibility` 17, `test_promotion_pricing` 13,
+`test_promotion_contracts` 5, `test_hooks` 5, `test_shell_contract` 1+7, `test_install_paths` 10.
+`test_preflight`: 42 tests / the same 4 pre-existing failures (site-fixture gap, unchanged).
+Static: `uvx ruff@0.14.10 check` passed, `format --check` 72 files clean. `apps/frappe`/`apps/erpnext`
+untouched.
+
+**Independent adversarial review: PASS with notes (0 must-fix).** Its two should-fix findings are
+applied and re-verified GREEN: (a) the I14 source-contract scan now also matches `promotions.facts` /
+`promotions import facts` so a symbol-import breach cannot stay green (hooks.py allowlisted as writer
+wiring); (b) `test_query_outlet_totals` now scopes its assertion to the run's own POS Profile instead
+of whole-list equality. Its three notes, recorded: (1) on installed-but-unmigrated sites every POS
+Invoice submit/cancel fails closed and loud (missing table) until each site migrates — atomic, no
+partial state (reviewer verified no `frappe.db.commit()` in the ERPNext submit/cancel path), but
+deployment ordering must migrate before shipping this tree to `development.localhost` /
+`selling-cutover.localhost`; (2) the only `on_cancel` skip path is banned `delete_doc(force=True)`
+orphaning rows — recoverable via `rebuild()`, no standard flow does it; (3) `rebuild()` is non-atomic
+(drop-then-reproject; an interruption leaves a partial table until re-run) — acceptable under I14,
+worth a rollout-runbook awareness line.
+
+**Awaiting commit authorization** for the Task 6 working-tree files only — Task 5 was already
+committed as `6bc4cf3` (exact-path staging; tool output stays excluded).
 
 
 
