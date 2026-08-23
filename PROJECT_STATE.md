@@ -1,32 +1,29 @@
 # PROJECT_STATE.md — AI session resume checkpoint
 
-**Last updated:** 2026-08-23 evening, Desk POS promotion picker built and browser-verified end to
-end on promo-mvp (sale + full return + facts), all promotion suites green; awaiting batch commit
-authorization. A parent-item click interception was added and verified so clicking a promotion
-parent opens the picker instead of being rejected. A page-asset localStorage caching root cause
-was found and worked around (developer_mode=1 on promo-mvp). UX overhaul remains committed as
-`4eaebde`. NOTE: the D12 incident is only partially resolved — the auto-insert flag is off and
-the original parent Item Price was deleted, but a NEW selling Item Price `28e53m5gfj` (Rp25.000,
-valid_from 2026-08-23, created by Administrator 17:38) now exists on parent item Paket Hemat
-Sarapan and needs an operator decision; see the interception section at the bottom.
-**Resume point:** Dynamic Promotion MVP (Tasks 1-7) complete and committed through `4eaebde`.
-The operator-directed Desk POS promotion picker (early activation of design §16's deferred item)
-is implemented and verified but UNCOMMITTED: `overrides/pos_promo_api.py` (3 whitelisted wrappers
-outside the promotions package, permission-gated), `public/js/pos_promotions.js` (page-scoped
-picker writing only the pending-payload field; engine materializes at checkout draft save),
-`hooks.page_js` now a 2-entry list with the `test_hooks` pin updated accordingly, guide section
-§8, new `test_pos_promo_api.py` (7 tests, GREEN ×2). E2E measured: PROMO-00001 sold at 27.000 via
-dialog quote inside a mixed cart → ACC-PSINV-2026-00001 submitted at 35.000 with correct Model C
-rows and NO parent Item Price created; complete return ACC-PSINV-2026-00002 (-35.000) passed the
-return guard and wrote negated facts for the same instance id. Demo prep on promo-mvp: POS
-Profile "Kasir JURI" matching the promotion outlet, customer Walk In JURI, prices for the four
-physical items, stock MAT-STE-2026-00002, POS Settings invoice_type flipped back to "POS
-Invoice". Measured ERPNext v16 facts recorded in AGENTS Keputusan Kunci: a user may hold only one
-open POS Opening Entry (an operator shift left open fails every suite's `_open_shift()`), closing
-cannot consolidate a sale together with its full return in one shift, and merge logs run as
-background jobs requiring the committed closing entry — the demo shift was therefore closed with
-an intentionally empty transaction list (invoices stay Paid/unconsolidated). Remaining
-uncommitted: this picker batch in selling_additional and this checkpoint in its own repo.
+**Last updated:** 2026-08-24, the Desk POS promotion picker batch is committed
+(selling_additional `666f5de`, this checkpoint `0f743de`). The D12 incident is fully closed: a
+2026-08-24 query found ZERO Item Price rows on either promotion parent — `28e53m5gfj` no longer
+exists (removed outside that session, likely via desk), so PROMO-00001 re-saves are unblocked.
+The MVP-vs-future boundary lives in design §16; the next phase awaits operator direction.
+**Resume point:** Dynamic Promotion MVP (Tasks 1-7) complete and committed through `4eaebde`;
+the operator-directed Desk POS promotion picker and parent-click interception committed as
+`666f5de`: `overrides/pos_promo_api.py` (3 whitelisted wrappers outside the promotions package,
+permission-gated), `public/js/pos_promotions.js` (page-scoped picker writing only the
+pending-payload field; engine materializes at checkout draft save; intercepts parent-item clicks
+into the picker with idempotent guard installation against the async controller timing),
+`hooks.page_js` a 2-entry list with the `test_hooks` pin updated accordingly, guide §8,
+`.eslintrc` global, new `test_pos_promo_api.py` (7 tests, GREEN ×2). E2E measured earlier:
+PROMO-00001 sold at 27.000 via dialog quote inside a mixed cart → ACC-PSINV-2026-00001 submitted
+at 35.000 with correct Model C rows and NO parent Item Price created; complete return
+ACC-PSINV-2026-00002 (-35.000) passed the return guard and wrote negated facts for the same
+instance id. Demo prep on promo-mvp stands: POS Profile "Kasir JURI" matching the promotion
+outlet, customer Walk In JURI, prices for the four physical items, stock MAT-STE-2026-00002,
+POS Settings invoice_type "POS Invoice". Measured ERPNext v16 facts recorded in AGENTS Keputusan
+Kunci: a user may hold only one open POS Opening Entry (an operator shift left open fails every
+suite's `_open_shift()`), closing cannot consolidate a sale together with its full return in one
+shift, and merge logs run as background jobs requiring the committed closing entry — the demo
+shift was therefore closed with an intentionally empty transaction list (invoices stay
+Paid/unconsolidated).
 
 The app-ownership extraction project (Phases 0-3) is complete; its record below stays as history.
 
@@ -1716,8 +1713,7 @@ Automation quirk (not a product bug): Playwright locator click times out inside 
 visible elements; CUA coordinate clicks work — operator's physical clicks were already proven
 to reach the handler before this fix.
 
-**New finding, needs operator decision:** Item Price `28e53m5gfj` exists for parent item Paket
-Hemat Sarapan (Standard Selling, Rp25.000, selling=1, valid_from 2026-08-23, created by
-Administrator 17:38 — not by any invoice submit; the auto-insert flag is 0). With it present,
-re-saving the PROMO-00001 master is rejected by D12. NOT deleted without authorization. The
-picker makes a parent Item Price unnecessary for simulation.
+**Resolved 2026-08-24:** Item Price `28e53m5gfj` no longer exists — a direct query found ZERO
+Item Price rows on either promotion parent (`Paket Hemat Sarapan`, `Bundling 2 Roti Hemat`), so
+the D12 predicate is clean and PROMO-00001 re-saves are unblocked. The row was removed outside
+the implementing session (likely by the operator via desk); no action was needed.
