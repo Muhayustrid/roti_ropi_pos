@@ -1,15 +1,32 @@
 # PROJECT_STATE.md — AI session resume checkpoint
 
-**Last updated:** 2026-08-22, Task 6 (reporting projection) implementation complete on
-`promo-mvp.localhost`; awaiting commit authorization for the Task 6 files.
-**Resume point:** Dynamic Promotion MVP — Tasks 1-4 committed (`7bf8dd9`), Task 5 committed
-(`6bc4cf3`, "feat: enforce complete-or-absent promotion returns (Task 5)"; the earlier "awaiting
-commit" note in this file was stale — git wins). Task 6 (reporting projection) is implemented,
-migrated, and verified; its working-tree changes await one commit authorization. Task 6's migrate
-already ran on `promo-mvp.localhost` (authorized 2026-08-22, backup
-`private/backups/20260822_175120-promo-mvp_localhost-database.sql.gz`). Next: Task 7 (hardening and
-release gates) per the implementation plan. Mobile POS P0 remediation is complete and verified. See
-§11 and §12.
+**Last updated:** 2026-08-23 evening, Desk POS promotion picker built and browser-verified end to
+end on promo-mvp (sale + full return + facts), all promotion suites green; awaiting batch commit
+authorization. A parent-item click interception was added and verified so clicking a promotion
+parent opens the picker instead of being rejected. A page-asset localStorage caching root cause
+was found and worked around (developer_mode=1 on promo-mvp). UX overhaul remains committed as
+`4eaebde`. NOTE: the D12 incident is only partially resolved — the auto-insert flag is off and
+the original parent Item Price was deleted, but a NEW selling Item Price `28e53m5gfj` (Rp25.000,
+valid_from 2026-08-23, created by Administrator 17:38) now exists on parent item Paket Hemat
+Sarapan and needs an operator decision; see the interception section at the bottom.
+**Resume point:** Dynamic Promotion MVP (Tasks 1-7) complete and committed through `4eaebde`.
+The operator-directed Desk POS promotion picker (early activation of design §16's deferred item)
+is implemented and verified but UNCOMMITTED: `overrides/pos_promo_api.py` (3 whitelisted wrappers
+outside the promotions package, permission-gated), `public/js/pos_promotions.js` (page-scoped
+picker writing only the pending-payload field; engine materializes at checkout draft save),
+`hooks.page_js` now a 2-entry list with the `test_hooks` pin updated accordingly, guide section
+§8, new `test_pos_promo_api.py` (7 tests, GREEN ×2). E2E measured: PROMO-00001 sold at 27.000 via
+dialog quote inside a mixed cart → ACC-PSINV-2026-00001 submitted at 35.000 with correct Model C
+rows and NO parent Item Price created; complete return ACC-PSINV-2026-00002 (-35.000) passed the
+return guard and wrote negated facts for the same instance id. Demo prep on promo-mvp: POS
+Profile "Kasir JURI" matching the promotion outlet, customer Walk In JURI, prices for the four
+physical items, stock MAT-STE-2026-00002, POS Settings invoice_type flipped back to "POS
+Invoice". Measured ERPNext v16 facts recorded in AGENTS Keputusan Kunci: a user may hold only one
+open POS Opening Entry (an operator shift left open fails every suite's `_open_shift()`), closing
+cannot consolidate a sale together with its full return in one shift, and merge logs run as
+background jobs requiring the committed closing entry — the demo shift was therefore closed with
+an intentionally empty transaction list (invoices stay Paid/unconsolidated). Remaining
+uncommitted: this picker batch in selling_additional and this checkpoint in its own repo.
 
 The app-ownership extraction project (Phases 0-3) is complete; its record below stays as history.
 
@@ -992,7 +1009,8 @@ Ruff 0.14.10 check and format clean, `git diff --check` clean.
 - Plan authority: `apps/selling_additional/docs/2026-08-18-dynamic-promotion-combo-implementation-plan.md` (commit `7984e2e`)
 - Dedicated test site: `promo-mvp.localhost` (Installed apps: `frappe`, `erpnext`, `selling_additional` only).
 
-**Gate G1 (Model C Spike) Status:** **G1 PASS**. **Gates G2 and G7 (Task 4): PASS.**
+**Gate G1 (Model C Spike) Status:** **G1 PASS**. **Gates G2 and G7 (Task 4): PASS.** All six
+Task 7 hardening gates PASS (2026-08-22) — see the Task 7 section below.
 
 ### Task 1 / G1 Evidence Summary (compressed — Task 4 has superseded this engine):
 
@@ -1414,8 +1432,292 @@ orphaning rows — recoverable via `rebuild()`, no standard flow does it; (3) `r
 (drop-then-reproject; an interruption leaves a partial table until re-run) — acceptable under I14,
 worth a rollout-runbook awareness line.
 
-**Awaiting commit authorization** for the Task 6 working-tree files only — Task 5 was already
-committed as `6bc4cf3` (exact-path staging; tool output stays excluded).
+**Task 6 was subsequently committed as `754017f`** ("feat: add Promotion Selection Fact reporting
+projection (Task 6)") — exact-path staging; tool output stayed excluded.
+
+### Task 7 / Hardening and Release Gates Evidence Summary
+
+**Scope:** plan Task 7 — final MVP gate. No production behavior change: `engine.py` gained 9
+comment lines only (the independent reviewer verified comment-only by stripped-byte diff).
+
+**Guard→test audit (mutation review of record).** Five parallel read-only audits (engine
+expansion, master validation, return guard, facts projection, cross-app contracts and permissions)
+re-verified every §12 ledger pair directly against source. Findings: three engine payload-input
+guards and two master exists-guards had no killing test; the return guard's role-branch selection
+and missing-instance throw share one killer. Cross-app contracts: all PASS (zero whitelist in
+`promotions/`, I14 enforced incl. symbolic-import scan, permissions per design §18 pinned incl.
+live DocPerm rows, no sibling-app imports, fixture order 6+4 intact, facts written only by system
+paths).
+
+**Hardening tests added (test files only), each mutation-killed with the engine/controller
+restored byte-identical afterwards:**
+
+- `test_promotion_expansion.py` +2: malformed-JSON payload guard (mutation → raw
+  `json.JSONDecodeError` escapes — killed), missing-`promotion`-key guard (mutation → "Promotion
+  None not found" — killed). Module 27 → 29 GREEN.
+- `test_promotion_master.py` +2: component/parent exists-guards under `ignore_links` — the only
+  reachable path, because `Document.insert` runs `_validate_links` before `validate`
+  (frappe/model/document.py:472/479) and both fields are Links; mutation → `AttributeError` on
+  `None` — killed. Module 36 → 38 GREEN.
+
+**Two documented non-independent pairs (source comments in `engine.py`; honest survivors, not
+gaps):** the payload exists-check duplicates `frappe.get_doc`'s own `DoesNotExistError`
+(`ValidationError` subclass, identical message — no honest killer exists); the return role-branch
+and the missing-instance throw form one causal guard — every killer of one kills the other by
+construction.
+
+**Run-twice.** All 8 promotion modules twice consecutive, all OK: facts 15, returns 19, expansion
+29, g1 7, master 38, eligibility 17, pricing 13, contracts 5. Full `--app selling_additional`
+suite twice consecutive — identical both passes: 334 tests, 18 failures, the same failing tests.
+All 18 attribute exactly to the documented site-fixture baseline: `test_migration` 5,
+`test_past_orders` 7, `test_preflight` 4, `test_price_group_concurrency` 1,
+`test_price_group_lifecycle` 1. No new failure, no regression. A `test_preflight` module-run
+reproduces the recorded 42/4 exactly (the suite total of 51 = 42 + the 9 plain `unittest.TestCase`
+tests the suite path also runs).
+
+**Adjacent regressions (gate 3):** all green in both suite passes, counts matching the Task 6
+baseline — walk_in 10, walk_in_asset 12, navigation 7, hooks 5, shell 1+7, install 10, checksums 6,
+module_transfer_patch 11, sidebar 9+1, recovery_map_digest 8, g1 7.
+
+**Model-sync/patches (gate 4):** DocType `modified` stamps unchanged and newest (fact 2026-08-22;
+Promotion 2026-08-20; promotion children 2026-08-19; Price Group trio 2026-08-16);
+`patches.txt` byte-identical to HEAD, byte-pin tests green in the suite; no other app defines any
+promotion DocType (grep across all bench apps). The optional scratch fresh-install site remains
+the operator's approval-gated choice — not created.
+
+**Preflight (gate 5):** `bench --site promo-mvp.localhost execute
+selling_additional.migration.preflight.check` for all three phases (`pre_model_sync`,
+`post_model_sync`, `final`) — every section `ok=true` with empty problems, confirmed with real
+output, not "considered".
+
+**Static (gate 6):** `uvx ruff@0.14.10 check .` all passed; `format --check .` 72 files clean,
+re-run after every edit.
+
+**Independent review (gate 7):** frappe-reviewer **PASS — Critical 0 / Important 0**. It verified
+the engine diff comment-only, the tests additive and convention-clean (rollback-first, no commit,
+unique names, one guard per assertRaisesRegex), the `ignore_links` legitimacy (ordering confirmed
+in installed source), and the `DoesNotExistError` equivalence. One should-fix applied: the
+ignore_links test comments now name framework-internal callers/patches as the real path (Data
+Import does not use ignore_links in this Frappe); `test_promotion_master` re-run GREEN (38 OK)
+after the reword.
+
+**Repo hygiene:** `apps/frappe` carries tool output only; `apps/erpnext` only its known
+`banking/yarn.lock` edit; `roti_ropi_pos` untouched apart from this checkpoint. Exact Task 7
+working set: `selling_additional/promotions/engine.py` (comments only),
+`selling_additional/tests/test_promotion_expansion.py`,
+`selling_additional/tests/test_promotion_master.py`.
+
+**Closed out (2026-08-22).** The operator declined the optional scratch fresh-install site —
+`promo-mvp.localhost` was itself created fresh in Task 1, so install-from-zero is already proven;
+gate 4 stands on the recorded stamp / patches-byte-pin / no-foreign-copy evidence. The three code
+files are committed as `8893996` ("test: add Task 7 hardening tests and guard-pairing docs",
+exact-path staging; tool output stayed excluded). The Dynamic Promotion MVP (Tasks 1-7) is
+complete. Still uncommitted in `selling_additional`'s working tree, awaiting their own
+authorization: the plan-doc Status line and the AGENTS.md/CLAUDE.md Project State update, plus
+this checkpoint in `roti_ropi_pos`.
+
+### Post-Task-7 operator-directed changes (2026-08-22, same day)
+
+Two operator requests after Task 7 closed; both executed and verified.
+
+**A. Promotion added to the Selling Additional sidebar (operator override of design §16's
+deferred navigation item).** Production changes: `workspace_sidebar/selling_additional.json`
+gains a third item (Promotion, DocType link, ERPNext's exact ten-key child shape, `modified`
+bumped 2026-08-16 → 2026-08-22) and the workspace Home card gains a matching Promotion Link row
+(`selling_additional/workspace/selling_additional/selling_additional.json`). Pin updates in
+`test_navigation.py` only (`EXPECTED_PROMOTION_ITEM`, items 2 → 3, workspace links list) — a
+scope change authorized by the operator, not a weakening. Applied on `promo-mvp.localhost` via an
+authorized migrate (backup first:
+`private/backups/20260822_221844-promo-mvp_localhost-database.sql.gz`); DB verified Home/Price
+Group/Promotion idx 1-3 plus three workspace Link rows. Verified: `test_navigation` 7 OK ×2,
+`test_sidebar_cleanup` 9 OK ×2, ruff clean. Other sites get the sidebar at their own future
+migrate.
+
+**B. Port 8000 permanently unpinned.** Root cause of the operator's "Page promotion not found"
+and failed logins: `sites/common_site_config.json` carried `default_site:
+selling-fresh.localhost`, and `bench serve` pins `_site` from `get_sites()` — every hostname on
+port 8000 was served as selling-fresh.localhost (since 2026-08-16). Fix: `default_site` removed
+(surgical JSON edit) + the operator's werkzeug reloader restarted in place (touch
+`apps/frappe/frappe/app.py`; honcho undisturbed). Verified per-hostname: promo-mvp login 200 and
+DocType Promotion 200 on port 8000. Side effect to remember: bench commands without `--site` no
+longer default to selling-fresh — pass `--site` explicitly. A temporary `bench serve --port 8001
+--site promo-mvp.localhost` ran during the investigation; it dies with the session, port 8000 is
+canonical again.
+
+**Measured baseline change (explained, not anomalous): `test_preflight` 4 → 1 failures on
+promo-mvp.** During the access fix the operator logged in and used the desk (serve log: session
+ropierpnext@gmail.com opened `/desk/promotion`, searched parent items on the new form); that
+activity created the missing `Standard Buying`/`Standard Selling` Price Lists (both rows created
+2026-08-22 22:13:07, Administrator), healing the three documented TestProfileRecovery site-fixture
+failures. The remaining failure is exactly the documented promo-mvp baseline entry
+(`test_missing_walk_in_blocks_on_legacy_site`, bakery not installed here).
+
+**Commits done (operator-authorized, 2026-08-22).** The sidebar/workspace/test changes are
+committed as `c940790` ("feat: surface Promotion in the Selling Additional sidebar"), and the
+Task 7 + post-Task-7 documentation (plan-doc Status, AGENTS/CLAUDE Project State) as `3ee7c2e`
+("docs: record Task 7 completion and post-Task-7 navigation changes"). `selling_additional`'s
+tracked working tree is clean (tool output only remains untracked). This checkpoint file in
+`roti_ropi_pos` is still uncommitted, awaiting that repo's own authorization.
+
+### Operator-directed Promotion form UX overhaul (2026-08-22/23, uncommitted in selling_additional)
+
+Operator found the Promotion form confusing; requested a user-friendly layout, worked examples,
+and an MD fill-in guide. Display-layer only: no fieldname, permission, hooks, or `patches.txt`
+changes; `choice_group_key` Data→Select is column-compatible (both varchar(140), verified in
+mariadb type map) and `_validate_selects` skips empty static options (verified base_document.py).
+
+**Changes (5 DocType JSONs, stamps → 2026-08-22 17:30):** intro HTML field `intro_help` (no-value
+type, no column); section relabels with descriptions (Promotion Details / Promo Product & Price /
+Fixed Components / Customer Choices — Groups / — Options / Where Active (Outlets)); per-field
+descriptions everywhere; `max_instances_per_invoice` label → "Max Packages Per Invoice" +
+`non_negative` (framework `_validate_non_negative` runs AFTER controller validate — document.py
+:587/:590 — so controller messages still fire first; negative-value tests unaffected, verified);
+`base_price`/`price_adjustment` get `options: "currency"` (symbol via `get_field_currency`; the
+`parent.` prefix does NOT resolve — plain fieldname falls through to `cur_frm.doc`); Choice Group
+grid hides `group_key` from list view; Option grid `choice_group_key` → Select "Choice Group".
+
+**New `doctype/promotion/promotion.js`:** Options-grid Choice Group column becomes a dropdown of
+this document's groups — `{label, value}` objects are supported by `ControlSelect.parse_option`
+(verified select.js) — showing labels, storing keys, "Untitled group" fallback, duplicate labels
+disambiguated by appending the key, disabled "Add a choice group first" hint when empty. Group keys
+are client-pre-generated at row add (`grp_`+8hex, same format as the server's; server only fills
+missing keys) so groups + options save in ONE pass. Outlet warehouse link filters by row company
+(Price Group pattern). Two framework facts cost debugging time and are now pinned in AGENTS
+Keputusan Kunci: (1) grid `<table>_add`/`_remove` handlers must be registered on the CHILD doctype
+(`get_handlers` looks up `handlers[child_doctype][event]`; ERPNext's `items_add` follows this) —
+first version registered on Promotion and silently never fired, found via live
+`frappe.ui.form.handlers` introspection; (2) FormMeta is served from `client_cache`
+(`doctype_form_meta::<dt>`, bypassed only in developer_mode) — a `.js` edit on non-developer-mode
+promo-mvp needed `bench --site promo-mvp.localhost clear-cache` before the server served it.
+
+**Verification:** prettier (pre-commit pin v2.7.1) clean; ruff clean; authorized migrate on
+promo-mvp (backup `20260822_234353-promo-mvp_localhost-database.sql.gz`) — all five metas synced
+on-site; browser-verified via IAB: form renders with new sections/descriptions, PROMO-00001 grid
+shows label columns, adding a group auto-assigned `grp_61cef387` and the Options dropdown listed
+"Pilih Roti" + the new group by label immediately. Worked examples created on promo-mvp (committed
+data): items Roti Coklat/Keju/Kismis, Kopi Susu Kotak, parents Paket Hemat Sarapan / Bundling 2
+Roti Hemat; PROMO-00001 "Paket Hemat Sarapan" (enabled, base 25.000, Kopi Susu ×1 fixed, group
+"Pilih Roti" pick 1 with +0/+2.000/+3.000 adjustments, max 2/invoice, outlet JURI/Stores-JURI)
+and PROMO-00002 "Bundling 2 Roti Hemat" (draft/disabled, pure fixed bundling). Guide:
+`selling_additional/docs/promotion-fill-in-guide.md`, deliberately Bahasa Indonesia (operator
+audience, noted in-file).
+
+**Promotion module test state after the migrate — resolved 2026-08-23 (operator decision).**
+Immediately after the migrate, contracts/eligibility/pricing/facts were GREEN ×2 while
+master/expansion/returns each failed exactly 1 test deterministically ×2. Root cause measured and
+NOT the layout change: the operator's 22-08 22:13:12 desk session enabled
+`Stock Settings.auto_insert_price_list_rate_if_missing` (ERPNext default 0), and
+`erpnext/stock/get_item_details.py:insert_item_price` auto-creates a selling Item Price for any
+transaction item without one — including promotion parent rows. Separately, on 23-08 01:19 a
+manual Item Price `4e6pith2hd` (Rp26.000, Standard Selling) was created for parent "Paket Hemat
+Sarapan" during desk use, making every Promotion re-save fail D12 ("must not have any selling
+Item Price"). Operator chose: delete the row + disable the flag. Executed and verified 23-08: no
+selling Item Price remains on either parent, flag 1→0, and the three previously failing modules
+are GREEN twice in a row (master 38 / expansion 29 / returns 19, both passes OK). Submitting promo
+invoices on promo-mvp is safe again. Standing ruling recorded in AGENTS Keputusan Kunci: promo
+sites must keep the flag off; engine hardening (parent rows must not trigger `insert_item_price`)
+remains a separate future task for sites/production that need the flag on.
 
 
 
+
+### Desk POS promotion picker (2026-08-23, uncommitted in selling_additional)
+
+Operator-directed early activation of design §16's "Desk POS picker (page-scoped asset in this
+app)". Plan approved via ExitPlanMode before implementation. Server contracts were already in
+`promotions/api.py`; only a facade + client asset were missing. No engine/domain/DocType/fixture/
+patch changes; no migrate needed (`page_js` files are read live via `get_js`).
+
+**Files:** `selling_additional/overrides/pos_promo_api.py` — three `@frappe.whitelist()` wrappers
+(`get_available_promotions`, `get_promotion_detail`, `quote_promotion`) gating on Promotion read +
+POS Profile read then delegating to the pure contracts (wrappers must stay outside the promotions
+package per the AST contract test). `selling_additional/public/js/pos_promotions.js` — page-
+scoped asset mounted like the walk-in script (wraps `frappe.pages["point-of-sale"].on_page_load`,
+MutationObserver): Promo button beside the cart label, eligible-promotions dialog, per-group qty
+steppers with live pick counters and `max_per_option` enforcement, package quantity with cap
+hint, server quote via `quote_promotion`, pending-payload chips (per-round remove, promo total),
+payload written to `custom_selling_additional_pending_promotions`; guards disable the button for
+non-POS-Invoice mode / submitted / already-materialized drafts and block edits or removals of
+rows carrying a promotion instance field. `hooks.py` `page_js` → 2-entry list (list support
+verified in `get_code_files_via_hooks`); `test_hooks` pin updated to the ordered list with the
+reason stated. `.eslintrc` gains the `selling_additional` global (the committed walk-in file had
+been failing eslint's no-undef identically). Guide §8 (Indonesian POS simulation walkthrough).
+New `tests/test_pos_promo_api.py`: permission gate, outlet filtering, JSON-string normalization,
+quote equality with the domain, ineligible rejection, and end-to-end materialization from a
+wrapper-quoted payload — 7 tests GREEN ×2 on promo-mvp.
+
+**Browser E2E (promo-mvp, Administrator, profile Kasir JURI):** opening entry created via the UI;
+PROMO-00001 listed (disabled PROMO-00002 excluded); Roti Keju picked → server quote Rp27.000 →
+chip shown; mixed cart with regular Roti Coklat; Checkout draft save materialized Model C rows
+(parent 27.000 + Kopi Susu 0 + Roti Keju 0), grand total 35.000, Promo button auto-locked;
+ACC-PSINV-2026-00001 submitted Paid; selections row `inst_b9a76de5d8a7` total 27000 frozen; fact
+rows written (Option + Fixed Component); NO parent Item Price was created (D12 fix held under a
+real submit). Recent Orders → Return loaded the complete negative cart, return guard passed,
+ACC-PSINV-2026-00002 (-35.000) submitted; facts show negated qty/promotion_total with
+is_return=1 for the same instance id. Stock does not move per invoice in this ERPNext line — it
+consolidates at closing (consistent with Task 1's Model C proof).
+
+**Demo prep on promo-mvp (authorized by the plan):** customer Walk In JURI; Standard Selling
+prices for Roti Coklat/Roti Keju/Roti Kismis/Kopi Susu Kotak (never the parents); Material
+Receipt MAT-STE-2026-00002 (50 each into Stores - JURI); POS Profile "Kasir JURI" on
+PT. Juara Roti Indonesia / Stores - JURI with Cash payment and Walk In JURI default; POS Settings
+invoice_type flipped from "Sales Invoice" back to "POS Invoice" (engine is POS-Invoice-only —
+the picker disables itself otherwise).
+
+**Measured ERPNext v16 facts (recorded in AGENTS Keputusan Kunci):**
+1. A user may hold only ONE open POS Opening Entry ("Cashier is currently assigned to another
+   POS") — an operator shift left open fails every suite's `_open_shift()` with mass errors.
+2. Consolidation cannot merge a sale together with its full return inside one closing entry:
+   netted rows vanish so return-item validation fails ("Returned Item Roti Coklat does not exist
+   in Sales Invoice ...").
+3. Merge logs run as enqueued background jobs — the closing entry must be committed BEFORE
+   submit or the job dies on LinkValidationError against the uncommitted closing.
+Consequence on promo-mvp: the demo shift was closed with an intentionally empty transaction list
+(POS-CLO-2026-00003); ACC-PSINV-2026-00001/-00002 remain Paid/Credit Note Issued unconsolidated
+(demo data), bins still show pre-sale stock. Regression after cleanup: all nine promotion-related
+modules green (hooks 5, contracts 5, eligibility 17, pricing 13 once; pos_promo_api 7 ×2, master
+38 ×2, expansion 29 ×2, returns 19 ×2, facts 15 ×2).
+
+### Parent-item click interception + page-asset caching (2026-08-23 evening, same uncommitted batch)
+
+Operator report: clicking the promotion parent item in the item selector added it as a plain
+cart row and the engine rejected it ("Row 1: Item Paket Hemat Sarapan is a Promotion parent item
+and cannot be sold on its own") instead of offering the choices.
+
+**Fix (pos_promotions.js only, uncommitted):**
+- `install_row_guards()` now wraps `pos.on_cart_update`: if the clicked item_code maps to an
+  eligible promotion parent (parent_map built from `get_available_promotions`), the click is
+  routed to `open_picker(promotion)` and never reaches the cart. Non-parent items pass through
+  to the original handler.
+- Timing bug found and fixed: `wrapper.pos` is created asynchronously inside `frappe.require`
+  AFTER `on_page_load` returns (point_of_sale.js line 11-14), so guard installation at mount
+  time always no-opped. `render()` now retries `install_row_guards()` (idempotent via
+  `__promo_guards`).
+- `get_parent_map` promise is now keyed per POS Profile (stale-promise edge on profile change).
+- Parent cards carry a "Promo" badge (`.pos-promo-badge` inside `.item-qty-pill`).
+
+**Serving root cause found (measured, important for all future page_js work):** Frappe desk
+pages are cached by the CLIENT in `localStorage["_page:<name>"]` (pageview.js line 23-26) and
+served from there whenever `frappe.boot.developer_mode != 1`. `bench clear-cache`, tab reload,
+and new tabs do NOT invalidate it; the only client-side invalidation is `sync_pages()` comparing
+the Page record's `modified` (2020 for point-of-sale — never changes). The browser therefore ran
+the ORIGINAL picker build for days despite the server serving newer files. Resolution on
+promo-mvp: `set-config developer_mode 1` (matches development.localhost convention; dev-mode-on
+sites always fetch fresh). Operator browsers against developer-mode-ON sites are unaffected;
+any browser that hit a dev-mode-OFF site keeps its stale `_page:` entry until site data is
+cleared — flag this when the picker ships to a dev-mode-off environment.
+
+**Browser verification (promo-mvp, IAB):** badge renders on the parent card; single click opens
+exactly one "Pick choices — Paket Hemat Sarapan" dialog, cart stays empty; Roti Keju picked →
+group status 1/1; Quote & Add → server quote Rp27.000, chip + "Promo total: Rp 27.000,00", draft
+payload `{"instances":[{"promotion":"PROMO-00001","selections":[{"choice_group_key":"grp_demo01",
+"options":[{"option_id":"qm5flg1cl5","qty":1}]}]}]`; Escape closes without side effects.
+Automation quirk (not a product bug): Playwright locator click times out inside the IAB despite
+visible elements; CUA coordinate clicks work — operator's physical clicks were already proven
+to reach the handler before this fix.
+
+**New finding, needs operator decision:** Item Price `28e53m5gfj` exists for parent item Paket
+Hemat Sarapan (Standard Selling, Rp25.000, selling=1, valid_from 2026-08-23, created by
+Administrator 17:38 — not by any invoice submit; the auto-insert flag is 0). With it present,
+re-saving the PROMO-00001 master is rejected by D12. NOT deleted without authorization. The
+picker makes a parent Item Price unnecessary for simulation.
