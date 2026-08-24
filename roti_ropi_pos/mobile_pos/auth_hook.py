@@ -38,6 +38,12 @@ MOBILE_POS_BROWSER_PATHS = {
 	"/api/method/frappe.integrations.oauth2.approve",
 }
 
+MOBILE_POS_CASHIER_EXACT_ROUTES = {
+	("GET", "/logout", None),
+	("POST", "/", "logout"),
+	("POST", "/api/method/logout", None),
+}
+
 MOBILE_POS_TOKEN_PATHS = {
 	"/api/method/frappe.integrations.oauth2.get_token",
 }
@@ -51,9 +57,11 @@ def validate_mobile_oauth_request(path: str, user: str) -> None:
 	is_mobile_client = bool(mobile_client_id and client_id == mobile_client_id)
 	is_mobile_only = _is_mobile_only_account(user)
 	command = frappe.form_dict.get("cmd")
+	method = getattr(frappe.request, "method", "GET")
+	is_exact_cashier_command = (method, path, command) in MOBILE_POS_CASHIER_EXACT_ROUTES
 	is_login_submit = path == "/api/method/login" and command == "login"
 
-	if command and (is_mobile_client or is_mobile_only) and not is_login_submit:
+	if command and (is_mobile_client or is_mobile_only) and not (is_login_submit or is_exact_cashier_command):
 		raise frappe.PermissionError("Legacy command dispatch is not allowed.")
 	if not is_mobile_client:
 		return
@@ -129,8 +137,15 @@ def validate_mobile_api_scope() -> None:
 		return
 
 	validate_mobile_oauth_request(path, user)
-	if _is_mobile_only_account(user) and path not in MOBILE_POS_BROWSER_PATHS:
-		raise frappe.PermissionError("This account may access only the Mobile POS API.")
+	if _is_mobile_only_account(user):
+		method = getattr(frappe.request, "method", "GET")
+		command = frappe.form_dict.get("cmd")
+		if path not in MOBILE_POS_BROWSER_PATHS and (
+			method,
+			path,
+			command,
+		) not in MOBILE_POS_CASHIER_EXACT_ROUTES:
+			raise frappe.PermissionError("This account may access only the Mobile POS API.")
 
 
 def _dispatch_identities() -> set[str]:

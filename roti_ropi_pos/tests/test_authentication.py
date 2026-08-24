@@ -66,10 +66,10 @@ class TestAuthentication(IntegrationTestCase):
 		frappe.set_user("Administrator")
 		super().tearDown()
 
-	def _request(self, path=BOOTSTRAP_PATH, *, user=None, form=None, authorization=""):
+	def _request(self, path=BOOTSTRAP_PATH, *, user=None, form=None, authorization="", method="GET"):
 		frappe.set_user(self.cashier if user is None else user)
 		frappe.local.form_dict = frappe._dict(form or {})
-		set_request(path)
+		set_request(path, method=method)
 		return patch("frappe.get_request_header", return_value=authorization)
 
 	def test_mobile_allowlist_contains_only_shipped_endpoints(self):
@@ -514,3 +514,48 @@ class TestAuthentication(IntegrationTestCase):
 				validate_mobile_api_scope()
 		with self._request(path="/api/method/frappe.client.get", user="Administrator"):
 			validate_mobile_api_scope()
+
+	def test_website_only_cashier_can_access_exact_browser_logout_routes(self):
+		self.assertFalse(frappe.get_doc("User", self.cashier).has_desk_access())
+		# Exact GET /logout is allowed
+		with self._request(path="/logout", method="GET"):
+			validate_mobile_api_scope()
+		# Exact POST /api/method/logout is allowed
+		with self._request(path="/api/method/logout", method="POST"):
+			validate_mobile_api_scope()
+		# The website bundle posts its logout command to the root route.
+		with self._request(path="/", method="POST", form={"cmd": "logout"}):
+			validate_mobile_api_scope()
+
+	def test_website_only_cashier_logout_rejects_wrong_methods_commands_and_aliases(self):
+		self.assertFalse(frappe.get_doc("User", self.cashier).has_desk_access())
+		# POST /logout is rejected
+		with self._request(path="/logout", method="POST"):
+			with self.assertRaises(frappe.PermissionError):
+				validate_mobile_api_scope()
+		# GET /api/method/logout is rejected
+		with self._request(path="/api/method/logout", method="GET"):
+			with self.assertRaises(frappe.PermissionError):
+				validate_mobile_api_scope()
+		# Legacy cmd=logout is rejected
+		with self._request(path="/logout", method="GET", form={"cmd": "logout"}):
+			with self.assertRaises(frappe.PermissionError):
+				validate_mobile_api_scope()
+		with self._request(path="/api/method/logout", method="POST", form={"cmd": "logout"}):
+			with self.assertRaises(frappe.PermissionError):
+				validate_mobile_api_scope()
+		with self._request(path="/api/method/login", method="POST", form={"cmd": "logout"}):
+			with self.assertRaises(frappe.PermissionError):
+				validate_mobile_api_scope()
+		# Generic cmd (e.g. frappe.client.get) rejected on exact allowed routes
+		for path, method in (("/logout", "GET"), ("/api/method/logout", "POST")):
+			with self.subTest(cmd_path=path, method=method), self._request(
+				path=path, method=method, form={"cmd": "frappe.client.get"}
+			):
+				with self.assertRaises(frappe.PermissionError):
+					validate_mobile_api_scope()
+		# Aliases /api/v1 or /api/v2 or trailing slash rejected
+		for path in ("/api/v1/method/logout", "/api/v2/method/logout", "/logout/", "/api/method/logout/"):
+			with self.subTest(path=path), self._request(path=path, method="POST"):
+				with self.assertRaises(frappe.PermissionError):
+					validate_mobile_api_scope()
