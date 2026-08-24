@@ -1,10 +1,16 @@
 # PROJECT_STATE.md — AI session resume checkpoint
 
-**Last updated:** 2026-08-24, the Desk POS promotion picker batch is committed
-(selling_additional `666f5de`, this checkpoint `0f743de`). The D12 incident is fully closed: a
-2026-08-24 query found ZERO Item Price rows on either promotion parent — `28e53m5gfj` no longer
-exists (removed outside that session, likely via desk), so PROMO-00001 re-saves are unblocked.
-The MVP-vs-future boundary lives in design §16; the next phase awaits operator direction.
+**Last updated:** 2026-08-24. Separate authorized Mobile POS browser-logout fix is complete on
+`fix/mobile-pos-browser-logout` at `e593491`: exact Frappe website logout dispatch is admitted while
+generic legacy commands remain blocked. Authentication (38 tests) and source contracts (43 tests)
+passed; live staging redirected the dedicated cashier session to `/login` and the next AppAuth flow
+opened fresh login UI. No push or merge occurred.
+
+The Desk POS promotion picker batch is committed (selling_additional `666f5de`, this checkpoint
+`0f743de`). The D12 incident is fully closed: a 2026-08-24 query found ZERO Item Price rows on either
+promotion parent — `28e53m5gfj` no longer exists (removed outside that session, likely via desk), so
+PROMO-00001 re-saves are unblocked. The MVP-vs-future boundary lives in design §16; the next phase
+awaits operator direction.
 **Resume point:** Dynamic Promotion MVP (Tasks 1-7) complete and committed through `4eaebde`;
 the operator-directed Desk POS promotion picker and parent-click interception committed as
 `666f5de`: `overrides/pos_promo_api.py` (3 whitelisted wrappers outside the promotions package,
