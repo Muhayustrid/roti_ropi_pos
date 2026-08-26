@@ -1,10 +1,27 @@
 # PROJECT_STATE.md — AI session resume checkpoint
 
-**Last updated:** 2026-08-24. Separate authorized Mobile POS browser-logout fix is complete on
-`fix/mobile-pos-browser-logout` at `e593491`: exact Frappe website logout dispatch is admitted while
-generic legacy commands remain blocked. Authentication (38 tests) and source contracts (43 tests)
-passed; live staging redirected the dedicated cashier session to `/login` and the next AppAuth flow
-opened fresh login UI. No push or merge occurred.
+**Last updated:** 2026-08-24 (later session). Leftover mobile-pos work is committed on
+`fix/mobile-pos-browser-logout`: the browser account-switch test pin (`0a28e2d`) and the
+extraction-approval status flip plus the app-shells plan, Android integration guide, and backend
+audit checkpoint docs (`118270b`); the auth module runs 39 tests OK on
+`mobile-pos-regression.localhost`.
+
+**NEXT PHASE — Mobile POS × Dynamic Promotion integration, not started.** `selling_additional`
+merged its promotion MVP + Desk picker to its `main` (`e4284f7..d5653de` fast-forward, pushed).
+The full execution brief for this session's repo lives at
+`docs/mobile-pos/promo-integration-handoff.md` — read it first when resuming. Shape: one optional
+`promotions` request field on the v1 sale payload (recorded v1 contract extension), opaque
+pass-through of `custom_selling_additional_pending_promotions`, Android consumes the three
+whitelisted `selling_additional.overrides.pos_promo_api` methods directly; no private imports
+(source-contract AST test), response DTOs unchanged, deploy sites need selling_additional
+migrated + `auto_insert_price_list_rate_if_missing = 0`. Open decision recorded there: Promotion
+`read` for the `Mobile POS Cashier` role (extend DocPerm in selling_additional vs assign Sales
+User).
+
+Previous state: the browser-logout fix itself is complete at `e593491`: exact Frappe website
+logout dispatch is admitted while generic legacy commands remain blocked. Authentication and
+source contracts passed; live staging redirected the dedicated cashier session to `/login` and the
+next AppAuth flow opened fresh login UI.
 
 The Desk POS promotion picker batch is committed (selling_additional `666f5de`, this checkpoint
 `0f743de`). The D12 incident is fully closed: a 2026-08-24 query found ZERO Item Price rows on either
