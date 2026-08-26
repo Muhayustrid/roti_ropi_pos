@@ -1,6 +1,6 @@
 # App Ownership Extraction Design
 
-**Status:** Draft for review
+**Status:** Approved for implementation planning
 **Date:** 2026-08-14
 **Scope:** `bakery_manufacturing`, `selling_additional`, `stock_additional`, and `roti_ropi_pos`
 
