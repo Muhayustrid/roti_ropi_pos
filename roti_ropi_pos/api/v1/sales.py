@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import json
 from decimal import Decimal
 
 import frappe
@@ -120,8 +121,11 @@ def _parse_sale_payload(value, *, currency: str | None = None) -> dict:
 			"client_accepted_grand_total",
 			"items",
 			"payments",
+			"promotions",
 		},
 	)
+	promotions = _promotions(payload.get("promotions"))
+	items = payload.get("items")
 	return {
 		"pos_profile": _name(payload.get("pos_profile"), "pos_profile", "Expected a POS Profile name."),
 		"customer": _optional_name(payload.get("customer"), "customer", "Expected a Customer name or null."),
@@ -135,9 +139,21 @@ def _parse_sale_payload(value, *, currency: str | None = None) -> dict:
 			"client_accepted_grand_total",
 			currency=currency,
 		),
-		"items": _items(payload.get("items")),
+		"items": [] if promotions is not None and items == [] else _items(items),
 		"payments": _payments(payload.get("payments"), currency=currency),
+		"promotions": promotions,
 	}
+
+
+def _promotions(value) -> str | None:
+	if value is None:
+		return None
+	if not isinstance(value, dict):
+		raise _invalid("promotions", "Expected a JSON object or null.")
+	serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+	if len(serialized.encode()) > 64 * 1024:
+		raise _invalid("promotions", "Promotions payload exceeds 64 KiB limit.")
+	return serialized
 
 
 def _parse_quote_payload(value) -> dict:

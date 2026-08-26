@@ -332,6 +332,72 @@ class TestSalePayloadDecimalParser(IntegrationTestCase):
 		self.assertEqual(parsed["client_accepted_grand_total"], Decimal("100.5"))
 		self.assertEqual(parsed["payments"][0]["amount"], Decimal("100.5"))
 
+	def test_parser_accepts_valid_promotions_object(self):
+		payload = self._payload(promotions={"instances": [{"promotion": "PROMO-00001"}]})
+		parsed = sales_api._parse_sale_payload(payload, currency="INR")
+		self.assertEqual(parsed["promotions"], '{"instances":[{"promotion":"PROMO-00001"}]}')
+
+	def test_parser_accepts_null_promotions(self):
+		payload = self._payload(promotions=None)
+		parsed = sales_api._parse_sale_payload(payload, currency="INR")
+		self.assertIsNone(parsed["promotions"])
+
+	def test_parser_omitted_promotions_defaults_to_none(self):
+		payload = self._payload()
+		parsed = sales_api._parse_sale_payload(payload, currency="INR")
+		self.assertIsNone(parsed["promotions"])
+
+	def test_parser_rejects_non_object_promotions(self):
+		for invalid in (["array"], "string", 123, True, 45.67):
+			self._assert_invalid(
+				self._payload(promotions=invalid),
+				field="promotions",
+				reason="Expected a JSON object or null.",
+			)
+
+	def test_parser_rejects_oversized_promotions_payload(self):
+		large_object = {"key": "x" * 65536}
+		self._assert_invalid(
+			self._payload(promotions=large_object),
+			field="promotions",
+			reason="Promotions payload exceeds 64 KiB limit.",
+		)
+
+	def test_parser_accepts_promotion_only_sale(self):
+		parsed = sales_api._parse_sale_payload(
+			self._payload(items=[], promotions={"instances": [{"promotion": "PROMO-00001"}]}),
+			currency="INR",
+		)
+		self.assertEqual(parsed["items"], [])
+
+	def test_parser_still_rejects_empty_plain_sale(self):
+		self._assert_invalid(
+			self._payload(items=[]),
+			field="items",
+			reason="Expected a non-empty array of items.",
+		)
+
+	def test_quote_cart_parser_rejects_promotions_field(self):
+		payload = {
+			"pos_profile": "ignored",
+			"customer": None,
+			"walk_in_customer_name": None,
+			"items": [
+				{
+					"item_code": "ignored",
+					"qty": "1",
+					"uom": "Nos",
+					"batch_no": None,
+					"serial_numbers": [],
+				}
+			],
+			"promotions": {"instances": []},
+		}
+		with self.assertRaises(MobilePOSAPIError) as error:
+			sales_api._parse_quote_payload(payload)
+		self.assertEqual(error.exception.code, "INVALID_REQUEST")
+		self.assertEqual(error.exception.details["field"], "promotions")
+
 
 class TestVerifyExactSettlement(IntegrationTestCase):
 	def _build_invoice(self, profile, grand_total: Decimal):
@@ -1198,3 +1264,151 @@ class TestCashierSaleFlow(IntegrationTestCase):
 			1,
 		)
 		self.assertEqual(frappe.db.count("Mobile POS Request", {"idempotency_key": key}), 1)
+
+
+class TestMobilePromotionSaleFlow(IntegrationTestCase):
+	"""Promotion payload stays opaque here and materializes through installed hooks."""
+
+	def setUp(self) -> None:
+		super().setUp()
+		self.addCleanup(frappe.db.rollback)
+		self.saved_pos_mode = frappe.db.get_single_value("POS Settings", "invoice_type")
+		frappe.db.set_single_value("POS Settings", "invoice_type", "POS Invoice")
+		self.cashier = make_cashier(f"promo-flow-{frappe.generate_hash(length=8)}@rotiropi.test")
+		_clear_user_permissions(self.cashier)
+		self.profile = make_valid_profile(f"Mobile POS Promo {frappe.generate_hash(length=8)}", self.cashier)
+		make_opening_entry(
+			user=self.cashier,
+			company=COMPANY,
+			pos_profile=self.profile.name,
+			period_start_date=frappe.utils.now_datetime(),
+			posting_date=frappe.utils.today(),
+		)
+		frappe.set_user("Administrator")
+		self.parent_item = self._make_promotion_item("Parent", stock=0)
+		self.component_item = self._make_promotion_item("Component", stock=1)
+		make_stock_entry(target=WAREHOUSE, item_code=self.component_item, qty=10, basic_rate=100)
+		self.promotion = frappe.get_doc(
+			{
+				"doctype": "Promotion",
+				"promotion_name": f"Mobile Promo {frappe.generate_hash(length=8)}",
+				"root_company": COMPANY,
+				"parent_item": self.parent_item,
+				"base_price": 25000,
+				"currency": self.profile.currency,
+				"enabled": 1,
+				"max_instances_per_invoice": 0,
+				"components": [{"item_code": self.component_item, "qty": 1}],
+				"outlets": [{"company": COMPANY, "warehouse": WAREHOUSE, "enabled": 1}],
+			}
+		).insert(ignore_permissions=True)
+		frappe.set_user(self.cashier)
+
+	def tearDown(self) -> None:
+		frappe.set_user("Administrator")
+		close_test_openings(self.cashier)
+		frappe.db.set_single_value("POS Settings", "invoice_type", self.saved_pos_mode or "POS Invoice")
+		super().tearDown()
+
+	def _call_submit(self, payload, *, idempotency_key=None):
+		key = idempotency_key or str(uuid4())
+		frappe.local.form_dict = frappe._dict(payload)
+		frappe.local.request = frappe._dict(headers={"X-Idempotency-Key": key})
+		with patch("frappe.get_request_header", return_value=key):
+			return sales_api.submit(), key
+
+	def _make_promotion_item(self, label, *, stock):
+		item_code = f"_Test Mobile Promo {label} {frappe.generate_hash(length=8)}"
+		frappe.get_doc(
+			{
+				"doctype": "Item",
+				"item_code": item_code,
+				"item_name": item_code,
+				"item_group": "All Item Groups",
+				"is_stock_item": stock,
+				"is_sales_item": 1,
+				"stock_uom": "Nos",
+			}
+		).insert(ignore_permissions=True)
+		return item_code
+
+	def _promotion_payload(self):
+		return {"instances": [{"promotion": self.promotion.name, "selections": []}]}
+
+	def _submit_promotion(self, *, idempotency_key=None):
+		payload = {
+			"pos_profile": self.profile.name,
+			"customer": None,
+			"walk_in_customer_name": None,
+			"client_accepted_grand_total": "25000",
+			"items": [],
+			"payments": [{"mode_of_payment": "Cash", "amount": "25000", "reference_no": None}],
+			"promotions": self._promotion_payload(),
+		}
+		return self._call_submit(payload, idempotency_key=idempotency_key)
+
+	def test_cashier_promotion_totals_materialize_before_mobile_total_check(self):
+		payload = sales_api._parse_sale_payload(
+			{
+				"pos_profile": self.profile.name,
+				"customer": None,
+				"walk_in_customer_name": None,
+				"client_accepted_grand_total": "25000",
+				"items": [],
+				"payments": [{"mode_of_payment": "Cash", "amount": "25000", "reference_no": None}],
+				"promotions": self._promotion_payload(),
+			},
+			currency=self.profile.currency,
+		)
+		with patch(
+			"roti_ropi_pos.mobile_pos.invoices._verify_accepted_total",
+			side_effect=lambda invoice, accepted: self.assertEqual(
+				Decimal(str(invoice.grand_total)),
+				accepted,
+				"promotion totals were not materialized",
+			),
+		):
+			submit_sale(payload, str(uuid4()))
+
+	def test_cashier_promotion_sale_materializes_model_c_rows_and_facts(self):
+		result, key = self._submit_promotion()
+		self.assertTrue(result["ok"], msg=str(result))
+		invoice = frappe.get_doc(
+			"POS Invoice",
+			{"custom_mobile_pos_transaction_id": key},
+		)
+		self.assertEqual(invoice.docstatus, 1)
+		self.assertFalse(invoice.custom_selling_additional_pending_promotions)
+		self.assertEqual(len(invoice.custom_selling_additional_promotion_selections), 1)
+		self.assertEqual(
+			{
+				row.item_code: (Decimal(str(row.rate)), row.custom_selling_additional_promotion_role)
+				for row in invoice.items
+			},
+			{
+				self.parent_item: (Decimal("25000"), "Promotion Parent"),
+				self.component_item: (Decimal("0"), "Promotion Component"),
+			},
+		)
+		self.assertEqual(
+			frappe.db.count("Promotion Selection Fact", {"pos_invoice": invoice.name, "is_return": 0}),
+			1,
+		)
+
+	def test_cashier_promotion_replay_does_not_duplicate_instances(self):
+		first, key = self._submit_promotion()
+		frappe.set_user(self.cashier)
+		second, _ = self._submit_promotion(idempotency_key=key)
+		self.assertTrue(first["ok"], msg=str(first))
+		self.assertTrue(second["ok"], msg=str(second))
+		self.assertEqual(first["data"], second["data"])
+		invoice_name = frappe.db.get_value("POS Invoice", {"custom_mobile_pos_transaction_id": key}, "name")
+		self.assertEqual(frappe.db.count("POS Invoice", {"custom_mobile_pos_transaction_id": key}), 1)
+		self.assertEqual(
+			frappe.db.count("POS Promotion Selection", {"parent": invoice_name}),
+			1,
+		)
+		self.assertEqual(
+			frappe.db.count("Promotion Selection Fact", {"pos_invoice": invoice_name, "is_return": 0}),
+			1,
+		)

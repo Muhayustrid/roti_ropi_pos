@@ -1,5 +1,7 @@
 # Handoff Prompt — Mobile POS × Dynamic Promotion Integration
 
+**Status (2026-08-26):** Implementation complete in working trees. Authorized backup `20260826_114814` + one migrate on `selling-cutover.localhost` succeeded; D12 flag verified and set to 0 under separate approval. Model C/fact/replay coverage is GREEN (`test_sale_task9` 71 ×2), cashier path is exact read-only `Promotion` DocPerm (`test_pos_promo_api` 8 ×2; contracts 5), source/auth regressions are GREEN, and independent review PASS (Critical 0 / Important 0). Exact-path commit and feature-branch push were authorized on 2026-08-26; deploy is not authorized.
+
 Copy everything below this line into a fresh AI session opened in
 `apps/roti_ropi_pos`. Do not paste anything above the line.
 

@@ -1,22 +1,37 @@
 # PROJECT_STATE.md — AI session resume checkpoint
 
-**Last updated:** 2026-08-24 (later session). Leftover mobile-pos work is committed on
-`fix/mobile-pos-browser-logout`: the browser account-switch test pin (`0a28e2d`) and the
-extraction-approval status flip plus the app-shells plan, Android integration guide, and backend
-audit checkpoint docs (`118270b`); the auth module runs 39 tests OK on
-`mobile-pos-regression.localhost`.
+**Last updated:** 2026-08-26. Mobile POS × Dynamic Promotion integration is active on branch
+`feat/mobile-pos-dynamic-promotions`; implementation remains uncommitted pending full verification.
 
-**NEXT PHASE — Mobile POS × Dynamic Promotion integration, not started.** `selling_additional`
-merged its promotion MVP + Desk picker to its `main` (`e4284f7..d5653de` fast-forward, pushed).
-The full execution brief for this session's repo lives at
-`docs/mobile-pos/promo-integration-handoff.md` — read it first when resuming. Shape: one optional
-`promotions` request field on the v1 sale payload (recorded v1 contract extension), opaque
-pass-through of `custom_selling_additional_pending_promotions`, Android consumes the three
-whitelisted `selling_additional.overrides.pos_promo_api` methods directly; no private imports
-(source-contract AST test), response DTOs unchanged, deploy sites need selling_additional
-migrated + `auto_insert_price_list_rate_if_missing = 0`. Open decision recorded there: Promotion
-`read` for the `Mobile POS Cashier` role (extend DocPerm in selling_additional vs assign Sales
-User).
+**ACTIVE — Mobile POS × Dynamic Promotion integration, implementation verified.** `sales.submit`
+accepts one optional `promotions` JSON object/null, serializes it as compact deterministic UTF-8
+JSON with a 64 KiB cap, and passes it opaquely to
+`custom_selling_additional_pending_promotions`; promotion-only sales may use `items: []`, while
+plain empty sales still fail. `sales.quote_cart`, response DTOs, existing envelopes/error codes,
+and the zero-private-import boundary remain unchanged. Parser and ordinary-sale coverage are GREEN:
+`test_sale_task9` 68 tests OK on `mobile-pos-regression.localhost`, plus selected parser tests twice.
+
+Task 2 and cashier permission are now GREEN on the qualifying four-app site. Operator authorized a
+backup (`20260826_114814`, database + files + site config) and exactly one migrate on
+`selling-cutover.localhost`; migrate exited 0 and created the Promotion schema. Post-migrate D12
+verification found `auto_insert_price_list_rate_if_missing = 1`; under separate explicit authorization
+it was set to `0` before mutating tests. Mobile's pre-insert total calculation initially saw
+`grand_total = None` because normal `before_validate` hooks had not run yet. Minimal fix calls the
+standard `invoice.run_method("before_validate")` only for non-null promotion submissions, before
+Mobile recalculates and compares totals; selling_additional still owns all materialization logic and
+there is no private import. Mutation removal reproduces the failure; restored source passes.
+
+Integration evidence: Model C parent revenue 25,000 + zero-rate stock component, consumed pending
+payload, one frozen selection, submitted fact projection, and same-key replay with exactly one
+invoice/selection/fact. `test_sale_task9` 71 OK ×2. Permission path is one exact read-only
+`Promotion` DocPerm for `Mobile POS Cashier`, not Sales User assignment; `test_pos_promo_api` 8 OK ×2
+and `test_promotion_contracts` 5 OK. Source contracts 43 OK, authentication 39 OK. Lifecycle mutation
+killed the focused test; Ruff 0.14.10 and diff checks clean. D12 final state: flag 0 and zero selling
+Item Prices across Promotion parents. Independent adversarial review PASS, Critical 0 / Important 0.
+Implementation is complete; exact-path commit and feature-branch push were authorized on 2026-08-26
+for this packaging step. Final commit hashes are reported externally to avoid a self-referential
+checkpoint commit. Deploy remains unauthorized. Full brief and ledger: `docs/mobile-pos/promo-integration-handoff.md` and
+`.superpowers/sdd/promo-integration-handoff/progress.md`.
 
 Previous state: the browser-logout fix itself is complete at `e593491`: exact Frappe website
 logout dispatch is admitted while generic legacy commands remain blocked. Authentication and
@@ -334,6 +349,14 @@ Phase 2 implementation is committed in all three implementation repositories (`0
 ---
 
 ## 10. Resume here
+
+Mobile POS × Dynamic Promotion implementation, permission, docs, focused verification, and final
+independent review are complete. Do not repeat backup/migrate or D12 mutation: authorized migrate on
+`selling-cutover.localhost` already exited 0, recovery point is `20260826_114814`, and
+`auto_insert_price_list_rate_if_missing` is now 0. Exact-path commit and feature-branch push are the
+current authorized packaging step. No deploy is authorized.
+
+Historical Phase 3 resume record follows.
 
 Phase 3 main-site rollout `ROLL-20260818-01` ran under explicit authorization on
 `development.localhost` in `frappe_docker_devcontainer-frappe-1`.

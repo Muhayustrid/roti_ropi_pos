@@ -96,8 +96,14 @@ def submit_sale(payload: dict, transaction_id: str) -> MutationResult:
 	invoice.customer = customer.name
 	invoice.custom_walk_in_customer_name = customer.custom_walk_in_customer_name
 	invoice.custom_mobile_pos_transaction_id = transaction_id
+	if payload.get("promotions") is not None:
+		invoice.custom_selling_additional_pending_promotions = payload["promotions"]
 	_validate_total_stock(profile, payload["items"])
 	_append_items(invoice, profile, customer.name, payload["items"])
+	if payload.get("promotions") is not None:
+		# Mobile computes authoritative totals before insert, so run the standard
+		# lifecycle event once here to let installed providers materialize rows.
+		invoice.run_method("before_validate")
 	invoice.set_missing_values()
 	invoice.calculate_taxes_and_totals()
 	_verify_accepted_total(invoice, payload["client_accepted_grand_total"])
