@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import frappe
@@ -514,6 +515,42 @@ class TestAuthentication(IntegrationTestCase):
 				validate_mobile_api_scope()
 		with self._request(path="/api/method/frappe.client.get", user="Administrator"):
 			validate_mobile_api_scope()
+
+	def test_mobile_oauth_consent_offers_exact_browser_account_switch(self):
+		html = frappe.render_template(
+			"templates/includes/oauth_confirmation.html",
+			{
+				"client_id": "Mobile POS",
+				"success_url": "/api/method/frappe.integrations.oauth2.approve?state=opaque",
+				"failure_url": "https://example.test/callback?error=access_denied",
+				"details": ["all"],
+				"csrf_token": "opaque-csrf",
+			},
+		)
+
+		self.assertIn('href="/logout"', html)
+		self.assertIn("Switch account", html)
+		self.assertEqual(html.count('href="/logout"'), 1)
+		self.assertNotIn("/api/method/logout", html)
+		self.assertNotIn("cmd=logout", html)
+		self.assertNotIn("redirect-to", html)
+		self.assertIn("window.location.href", html)
+		self.assertIn("sessionStorage.setItem", html)
+		self.assertIn('method="POST"', html)
+		self.assertIn('action="/api/method/frappe.integrations.oauth2.approve?state=opaque"', html)
+
+		logout_html = (
+			Path(frappe.get_app_path("roti_ropi_pos")) / "www" / "logout.html"
+		).read_text()
+		self.assertIn('method: "logout"', logout_html)
+		self.assertIn("if (response.exc)", logout_html)
+		self.assertIn("sessionStorage.getItem", logout_html)
+		self.assertIn('candidate.origin !== window.location.origin', logout_html)
+		self.assertIn(
+			'candidate.pathname !== "/api/method/frappe.integrations.oauth2.authorize"',
+			logout_html,
+		)
+		self.assertIn('window.location.href = "/login?redirect-to=" + encodeURIComponent(candidate.href)', logout_html)
 
 	def test_website_only_cashier_can_access_exact_browser_logout_routes(self):
 		self.assertFalse(frappe.get_doc("User", self.cashier).has_desk_access())
