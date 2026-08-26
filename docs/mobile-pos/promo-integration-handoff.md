@@ -1,124 +1,110 @@
-# Handoff Prompt — Mobile POS × Dynamic Promotion Integration
+# Mobile POS Dynamic Promotion Backend Status
 
-**Status (2026-08-26):** Implementation complete in working trees. Authorized backup `20260826_114814` + one migrate on `selling-cutover.localhost` succeeded; D12 flag verified and set to 0 under separate approval. Model C/fact/replay coverage is GREEN (`test_sale_task9` 71 ×2), cashier path is exact read-only `Promotion` DocPerm (`test_pos_promo_api` 8 ×2; contracts 5), source/auth regressions are GREEN, and independent review PASS (Critical 0 / Important 0). Exact-path commit and feature-branch push were authorized on 2026-08-26; deploy is not authorized.
+## Purpose
 
-Copy everything below this line into a fresh AI session opened in
-`apps/roti_ropi_pos`. Do not paste anything above the line.
+This document records the backend state for Android Dynamic Promotion integration. Runtime source and executable tests are authoritative.
 
----
+The Mobile POS sale extension is complete. Both backend contracts for Android checkout are now closed with executable evidence.
 
-## Task
+## Implemented Backend Work
 
-Integrate the Dynamic Promotion engine (owned by `selling_additional`) into
-the Mobile POS v1 API so a cashier on Android can sell a promotion package.
-The change is small: the engine already owns the full POS Invoice lifecycle.
-Mobile only needs to (a) let the client discover/quote promotions and
-(b) carry a pending-promotion payload on sale submission.
+`roti_ropi_pos` commit `859e0b7` adds one optional request-only `sales.submit.promotions` object. It:
 
-Read `PROJECT_STATE.md` first — it is the canonical cross-repo checkpoint.
-Read `selling_additional/AGENTS.md` (sibling app) for the promotion domain
-rules before touching anything.
+- accepts a JSON object or `null`;
+- permits promotion-only `items: []` when the object is non-null;
+- keeps plain empty-item sales invalid;
+- serializes the object as compact deterministic UTF-8 JSON;
+- rejects serialized payloads above 64 KiB;
+- includes the normalized value in the idempotency request hash;
+- passes the value opaquely through `custom_selling_additional_pending_promotions`;
+- returns the unchanged standard `SaleDetail` and existing error enum.
 
-## What already exists (do NOT rebuild)
+`selling_additional` commit `81346f0` grants `Mobile POS Cashier` read-only Promotion permission. It grants no create, write, delete, report, export, share, or submit permission.
 
-`selling_additional` (merged to its `main` at `d5653de…`/`d565e3e`) owns:
+The `selling_additional` lifecycle materializes Model C rows before the Mobile POS total check:
 
-- The Promotion DocTypes, the pure domain module
-  (`selling_additional/promotions/` — eligibility, pricing, engine), and the
-  POS Invoice lifecycle hooks (`before_validate` materializes a pending
-  payload into rows; `validate`/`before_submit` re-assert invariants;
-  `on_submit`/`on_cancel` write facts).
-- Three whitelisted HTTP endpoints, permission-gated, in
-  `selling_additional/overrides/pos_promo_api.py`:
-  - `get_available_promotions(pos_profile)`
-  - `get_promotion_detail(promotion, pos_profile)`
-  - `quote_promotion(promotion, choices, pos_profile)`
-- The invoice-level Custom Field that carries the pending payload:
-  `custom_selling_additional_pending_promotions` (JSON string:
-  `{"instances": [{"promotion": ..., "selections": [...]}]}`).
-- The Desk POS reference client: `selling_additional/.../pos_promotions.js`
-  (how a client drives the picker: list → detail → quote → set pending
-  payload → save).
+- one non-stock parent carries full package revenue;
+- stock components carry zero revenue;
+- submit writes promotion selection facts;
+- replay creates no second invoice, selection, or fact.
 
-The engine materializes rows on invoice save. A mobile invoice **without**
-the payload field is a plain invoice — the engine no-ops. That path is
-already safe and tested.
+## Verified Evidence
 
-## Hard constraints
+- `roti_ropi_pos.tests.test_sale_task9`: 71 tests passed twice (including promotion sale) on the qualifying site.
+- `selling_additional.tests.test_pos_promo_api`: 8 tests passed twice (including assigned/enabled profile and POST-only checks).
+- `roti_ropi_pos.tests.test_promo_bearer_route`: 17 tests passed twice — valid cashier reaches all three exact POST paths, negatives remain denied.
+- `roti_ropi_pos.tests.test_quote_cart_promotions`: 12 tests passed twice — parser, promotion-only, mixed, oversized, and artifact checks.
+- `roti_ropi_pos.tests.test_promo_quote_submit_integration`: 4 tests passed twice — promotion-only, mixed, replay, and price-change parity.
+- `selling_additional.tests.test_promotion_contracts`: 5 tests passed.
+- `roti_ropi_pos.tests.test_source_contracts`: 43 tests passed.
+- `roti_ropi_pos.tests.test_authentication`: 39 tests passed twice (allowlist now 20 with promo facades).
+- Independent review for the sale extension found Critical 0 and Important 0; promo bearer and quote integration also verified.
 
-1. **Mobile POS v1 contract is closed.** No new error codes, no changed
-   response fields, no changed transport. The only permitted change is ONE
-   new OPTIONAL request field on the sale payload (below). Record this as an
-   explicit contract-extension decision in `PROJECT_STATE.md` and update
-   `docs/mobile-pos/api-contract.md` in the same commit.
-2. **No private imports.** `roti_ropi_pos` must never import
-   `selling_additional.*` modules. The source-contract test
-   `roti_ropi_pos/tests/test_source_contracts.py` (AST scan) enforces this.
-   The pending payload is an opaque JSON string passed through a Custom
-   Field — roti validates nothing, the engine's hooks do.
-3. **Deploy order.** A site running the integrated mobile API must have
-   `selling_additional` migrated (backup → migrate) and
-   `auto_insert_price_list_rate_if_missing = 0` (D12 rule: promotion parent
-   items must never gain Item Prices).
-4. `required_apps` already lists `selling_additional` — keep it that way.
+## Blocker 1: Direct HTTP Route — CLOSED
 
-## Implementation steps
+Three facade methods exist (now allowlisted and POST-only):
 
-1. **Sale payload extension** — `roti_ropi_pos/api/v1/sales.py`:
-   - `_parse_sale_payload` allowlist: add one optional field, e.g.
-     `promotions` (JSON object `{"instances": [...]}` or null).
-   - Parse it as an opaque JSON string (size-cap it, e.g. 64 KB) and thread
-     it to the invoice builder in `roti_ropi_pos/mobile_pos/invoices.py`,
-     which sets `custom_selling_additional_pending_promotions`.
-   - Do NOT add it to `_parse_quote_payload` unless you also wire cart-quote
-     promo pricing (see step 3 — optional, decide explicitly).
-   - `_unknown()` must keep rejecting everything else. All existing error
-     codes stay byte-identical.
-2. **Idempotency** — the payload is part of the invoice doc, so replays of
-   the same `transaction_id` materialize identically (engine materializes
-   once, I8). Add a test proving replay with the same payload does not
-   duplicate instances.
-3. **Discovery/quote for Android** — no new roti endpoints. The Android
-   client calls the three `selling_additional.overrides.pos_promo_api`
-   methods directly over HTTP with the cashier's bearer token.
-   - **Decision point:** the gate requires Promotion `read`. Design §18
-     grants read to Sales User; the `Mobile POS Cashier` role may lack it.
-     If so, extend the Promotion DocPerm in `selling_additional` to grant
-     read to `Mobile POS Cashier` (that is a selling_additional change —
-     coordinate it there, one permission row + fixture + test), or have the
-     site assign Sales User to cashiers. Record which path was taken.
-4. **Response DTOs unchanged** — materialized promotion rows flow back
-   through `sale_item_dto` with standard fields only. Do not add promo
-   fields to v1 responses.
-5. **Tests** (all in roti_ropi_pos, no selling_additional imports):
-   - Sale with `promotions` payload → invoice submitted, Model C rows
-     correct (parent full revenue + zero-rate components), facts written.
-   - Sale without the field → byte-identical v1 behaviour (regression).
-   - Invalid/oversized/unknown-shape payload → existing INVALID-style error
-     envelope, no new error codes.
-   - Replay idempotency (see step 2).
-   - Source-contract test still green (no private imports).
-6. **Docs**: update `docs/mobile-pos/api-contract.md` (the one new optional
-   request field) and this file's status line.
-
-## Verification
-
-```bash
-cd /workspace/development/frappe-bench
-bench --site mobile-pos-regression.localhost run-tests --module roti_ropi_pos.tests.test_source_contracts
-bench --site mobile-pos-regression.localhost run-tests --module roti_ropi_pos.tests.test_authentication
-# plus the new test module(s) you add; run mutating modules twice
+```text
+/api/method/selling_additional.overrides.pos_promo_api.get_available_promotions
+/api/method/selling_additional.overrides.pos_promo_api.get_promotion_detail
+/api/method/selling_additional.overrides.pos_promo_api.quote_promotion
 ```
 
-Ruff from the app root: `uvx ruff check .` and `uvx ruff format --check .`.
-Never run two suites concurrently against one site.
+All three decorators are now `@frappe.whitelist(methods=["POST"])`, preserving the Desk POS `frappe.xcall()` (POST) consumer. They return native Frappe `{ "message": ... }` responses.
 
-## Boundaries
+`roti_ropi_pos/mobile_pos/auth_hook.py` now allowlists exactly 20 methods: the original 17 plus the three promo facades. `MOBILE_POS_PATHS` derives from that set. A valid dedicated cashier bearer reaches all three exact POST paths; all negatives remain denied.
 
-- Do not modify `selling_additional` from this session except the single
-  Promotion permission row if step 3's decision requires it — and record it.
-- Do not touch `bakery_manufacturing`, stock/scanner ownership, or the Desk
-  POS asset.
-- Commit messages in English; communicate with the operator in Indonesian.
-- Update `PROJECT_STATE.md` (resume point + the v1-extension decision) at
-  the end; commit it.
+Facade scope is now fail-closed: `_check_access` requires an explicit `pos_profile`, verifies the POS Profile exists, is enabled, is readable, and is assigned to `frappe.session.user` via `applicable_for_users` (Administrator bypasses assignment for existing Desk tests). `get_promotion_detail` now requires `pos_profile`; an ineligible promotion for the assigned outlet returns `eligibility.is_eligible == false` with a reason, and quote/materialization rejects it — this preserves Desk behavior while keeping profile scope fail-closed.
+
+Verified exit evidence (17-test bearer module, twice):
+
+1. Valid mobile-only cashier reaches all three exact POST paths through HTTP (including `validate_mobile_api_scope`).
+2. All three calls require an enabled POS Profile assigned to that cashier.
+3. All three are POST-only; GET/PUT/DELETE/PATCH are rejected via `allowed_http_methods_for_whitelisted_func`.
+4. Wrong-client and expired bearer tokens are rejected with `AuthenticationError`.
+5. Disabled users and users without `Mobile POS Cashier` are rejected.
+6. Missing, unassigned, disabled profiles are rejected with `PermissionError`/`ValidationError`.
+7. Generic RPC, `/api/resource`, `/api/v2`, `cmd=`, alias, encoded, and trailing-path variants remain blocked.
+8. Promotion permission remains read-only (verified by `test_promotion_contracts`).
+9. Detail for an ineligible promotion returns `is_eligible false` (not a generic success) — documented above.
+
+## Blocker 2: Authoritative Combined Quote — CLOSED
+
+`sales.quote_cart` now accepts the same optional `promotions` object/null as `sales.submit` (compact deterministic UTF-8, 64 KiB limit, opaque in `roti_ropi_pos`, validated/materialized in `selling_additional`). `quote_promotion.total_price` remains package pricing only; the authoritative quote is `sales.quote_cart`.
+
+The quote lifecycle reuses the same `before_validate` providers as submit: for non-null promotions the in-memory `POS Invoice` sets `custom_selling_additional_pending_promotions` and runs `before_validate` before `set_missing_values` and `calculate_taxes_and_totals`, so Model C parent (full revenue) and components (zero) are materialized before tax/rounding. A shared helper avoids duplicated lifecycle logic. The invoice is never saved.
+
+Verified exit evidence (12-test quote module + 4-test integration, each twice):
+
+1. Regular-only quote unchanged; `promotions: null` equals omission.
+2. Promotion-only (`items: []` allowed only with non-null promotions) returns Model C parent and components with authoritative `grand_total`, `payable`, `taxes`, `payment_modes`, and `payment_amount_policy`.
+3. Mixed regular+promotion quote returns combined authoritative totals; `sales.submit` accepts the quoted `grand_total`/`payable` unchanged and creates exactly one Model C instance.
+4. Stale quote triggers existing `PRICE_CHANGED` and creates no invoice.
+5. Quote creates no `POS Invoice`, `Mobile POS Request`, selection, fact, Item Price, or stock/accounting artifact (proven by counts before/after).
+6. `promotions` accepts object or `null`, rejects non-objects and oversized payloads with `INVALID_REQUEST`, and uses the existing error contract for semantic invalidity.
+
+## Deployment Prerequisites
+
+Before any target site serves the completed sale extension:
+
+1. Take and record a backup.
+2. Migrate `selling_additional` on that site.
+3. Set `Stock Settings.auto_insert_price_list_rate_if_missing` to `0`.
+4. Verify all Promotion parent items have zero selling Item Price rows.
+5. Verify POS Settings uses POS Invoice mode.
+
+The authorized backup `20260826_114814` and one migrate on `selling-cutover.localhost` succeeded during prior backend implementation (verified recovery boundary). No new migrate was performed in this task; that historical authorization does not authorize another migrate or deployment.
+
+## Canonical Documents
+
+- `PROJECT_STATE.md` — cross-app checkpoint and resume point.
+- `docs/mobile-pos/api-contract.md` — normative Mobile POS wire contract.
+- `docs/mobile-pos/authentication.md` — bearer and exact-route boundary.
+- `docs/mobile-pos/android-integration-guide.md` — complete Android gateway guide.
+- `/Users/rotiropi/POS_Android/docs/dynamic-promotion-integration-handoff.md` — actual React Native file map, gates, and future sequence.
+
+## Resume Point — Both Blockers Closed
+
+The exact bearer-route contract and the authoritative promotion-aware quote are now closed with executable evidence. Android transport and UI implementation may start from `/Users/rotiropi/POS_Android/docs/dynamic-promotion-integration-handoff.md`. The Desk POS `frappe.xcall()` POST consumer remains supported.
+
+Deploy is not authorized by this document.

@@ -162,6 +162,13 @@ def _parse_quote_payload(value) -> dict:
 	The quote is non-binding and intentionally has no payment rows and no
 	``client_accepted_grand_total``. Android does not need to send a payment
 	plan to obtain a server-authoritative payable snapshot.
+
+	``promotions`` is an optional request-only JSON object or null, using the
+	same compact deterministic UTF-8 serialization and 64 KiB limit as
+	``sales.submit``. ``roti_ropi_pos`` treats it as opaque; ``selling_additional``
+	owns semantic validation and materialization. A promotion-only quote may send
+	``items: []`` when ``promotions`` is non-null; a plain quote still requires
+	non-empty ``items``.
 	"""
 	value.pop("cmd", None)
 	payload = require_json_object(value, field="payload")
@@ -172,8 +179,11 @@ def _parse_quote_payload(value) -> dict:
 			"customer",
 			"walk_in_customer_name",
 			"items",
+			"promotions",
 		},
 	)
+	promotions = _promotions(payload.get("promotions"))
+	items = payload.get("items")
 	return {
 		"pos_profile": _name(payload.get("pos_profile"), "pos_profile", "Expected a POS Profile name."),
 		"customer": _optional_name(payload.get("customer"), "customer", "Expected a Customer name or null."),
@@ -182,7 +192,8 @@ def _parse_quote_payload(value) -> dict:
 			"walk_in_customer_name",
 			"Expected a display name or null.",
 		),
-		"items": _items(payload.get("items")),
+		"items": [] if promotions is not None and items == [] else _items(items),
+		"promotions": promotions,
 	}
 
 

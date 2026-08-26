@@ -94,6 +94,9 @@ class TestAuthentication(IntegrationTestCase):
 				"/api/method/roti_ropi_pos.api.v1.closing.submit",
 				"/api/method/roti_ropi_pos.api.v1.closing.recover",
 				"/api/method/roti_ropi_pos.api.v1.closing.status",
+				"/api/method/selling_additional.overrides.pos_promo_api.get_available_promotions",
+				"/api/method/selling_additional.overrides.pos_promo_api.get_promotion_detail",
+				"/api/method/selling_additional.overrides.pos_promo_api.quote_promotion",
 			},
 		)
 
@@ -539,18 +542,18 @@ class TestAuthentication(IntegrationTestCase):
 		self.assertIn('method="POST"', html)
 		self.assertIn('action="/api/method/frappe.integrations.oauth2.approve?state=opaque"', html)
 
-		logout_html = (
-			Path(frappe.get_app_path("roti_ropi_pos")) / "www" / "logout.html"
-		).read_text()
+		logout_html = (Path(frappe.get_app_path("roti_ropi_pos")) / "www" / "logout.html").read_text()
 		self.assertIn('method: "logout"', logout_html)
 		self.assertIn("if (response.exc)", logout_html)
 		self.assertIn("sessionStorage.getItem", logout_html)
-		self.assertIn('candidate.origin !== window.location.origin', logout_html)
+		self.assertIn("candidate.origin !== window.location.origin", logout_html)
 		self.assertIn(
 			'candidate.pathname !== "/api/method/frappe.integrations.oauth2.authorize"',
 			logout_html,
 		)
-		self.assertIn('window.location.href = "/login?redirect-to=" + encodeURIComponent(candidate.href)', logout_html)
+		self.assertIn(
+			'window.location.href = "/login?redirect-to=" + encodeURIComponent(candidate.href)', logout_html
+		)
 
 	def test_website_only_cashier_can_access_exact_browser_logout_routes(self):
 		self.assertFalse(frappe.get_doc("User", self.cashier).has_desk_access())
@@ -586,8 +589,9 @@ class TestAuthentication(IntegrationTestCase):
 				validate_mobile_api_scope()
 		# Generic cmd (e.g. frappe.client.get) rejected on exact allowed routes
 		for path, method in (("/logout", "GET"), ("/", "POST"), ("/api/method/logout", "POST")):
-			with self.subTest(cmd_path=path, method=method), self._request(
-				path=path, method=method, form={"cmd": "frappe.client.get"}
+			with (
+				self.subTest(cmd_path=path, method=method),
+				self._request(path=path, method=method, form={"cmd": "frappe.client.get"}),
 			):
 				with self.assertRaises(frappe.PermissionError):
 					validate_mobile_api_scope()

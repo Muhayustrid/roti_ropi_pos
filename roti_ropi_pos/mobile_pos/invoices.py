@@ -96,14 +96,10 @@ def submit_sale(payload: dict, transaction_id: str) -> MutationResult:
 	invoice.customer = customer.name
 	invoice.custom_walk_in_customer_name = customer.custom_walk_in_customer_name
 	invoice.custom_mobile_pos_transaction_id = transaction_id
-	if payload.get("promotions") is not None:
-		invoice.custom_selling_additional_pending_promotions = payload["promotions"]
+	_apply_promotion_pending(invoice, payload)
 	_validate_total_stock(profile, payload["items"])
 	_append_items(invoice, profile, customer.name, payload["items"])
-	if payload.get("promotions") is not None:
-		# Mobile computes authoritative totals before insert, so run the standard
-		# lifecycle event once here to let installed providers materialize rows.
-		invoice.run_method("before_validate")
+	_materialize_if_promoted(invoice, payload)
 	invoice.set_missing_values()
 	invoice.calculate_taxes_and_totals()
 	_verify_accepted_total(invoice, payload["client_accepted_grand_total"])
@@ -123,6 +119,32 @@ def submit_sale(payload: dict, transaction_id: str) -> MutationResult:
 	)
 
 
+def _apply_promotion_pending(invoice, payload: dict) -> None:
+	"""Set the pending promotion payload and materialize via before_validate.
+
+	Shared helper for quote and submit so both use the same registered
+	``before_validate`` providers before ``set_missing_values`` and
+	``calculate_taxes_and_totals``. The invoice is never saved here.
+	"""
+	if payload.get("promotions") is not None:
+		invoice.custom_selling_additional_pending_promotions = payload["promotions"]
+
+
+def _materialize_if_promoted(invoice, payload: dict) -> None:
+	if payload.get("promotions") is not None:
+		try:
+			invoice.run_method("before_validate")
+		except frappe.ValidationError as exc:
+			# Promotion semantic validation (not found, not eligible, choice errors) is
+			# a client input error, not a server defect. Map to the stable
+			# INVALID_REQUEST envelope so the mobile client sees a retryable=false
+			# error instead of a native 500/417. The ValidationError message already
+			# names the promotion/choice problem.
+			raise MobilePOSAPIError(
+				"INVALID_REQUEST", str(exc), details={"field": "promotions", "reason": str(exc)}
+			) from exc
+
+
 def build_sale_quote(payload: dict) -> dict:
 	"""Return a server-authoritative snapshot of the payable for a full cart.
 
@@ -135,6 +157,11 @@ def build_sale_quote(payload: dict) -> dict:
 	profile: ``get_current_opening`` already filters by the authenticated
 	user and the selected profile, so an opening that belongs to a
 	different user or a different profile cannot satisfy this gate.
+
+	For non-null promotions the in-memory invoice lets registered
+	``before_validate`` providers materialize Model C rows before
+	missing-value setup and tax calculation, matching the submit lifecycle
+	without duplicating that logic.
 	"""
 	profile = get_authorized_profile(payload["pos_profile"])
 	require_pos_invoice_mode()
@@ -157,7 +184,9 @@ def build_sale_quote(payload: dict) -> dict:
 	invoice.company = profile.company
 	invoice.customer = customer.name
 	invoice.custom_walk_in_customer_name = customer.custom_walk_in_customer_name
+	_apply_promotion_pending(invoice, payload)
 	_append_items(invoice, profile, customer.name, payload["items"])
+	_materialize_if_promoted(invoice, payload)
 	invoice.set_missing_values()
 	invoice.calculate_taxes_and_totals()
 	# ``rounded_total`` is ERPNext's authoritative payable when the site is

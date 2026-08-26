@@ -1,9 +1,9 @@
 # PROJECT_STATE.md — AI session resume checkpoint
 
-**Last updated:** 2026-08-26. Mobile POS × Dynamic Promotion integration is active on branch
-`feat/mobile-pos-dynamic-promotions`; implementation remains uncommitted pending full verification.
+**Last updated:** 2026-08-27. Mobile POS Dynamic Promotion sale extension is merged on `main` at
+`859e0b7`; `selling_additional` permission support is merged at `81346f0`. Both backend blockers for Android checkout are now closed with executable evidence (see below).
 
-**ACTIVE — Mobile POS × Dynamic Promotion integration, implementation verified.** `sales.submit`
+**ACTIVE — backend sale extension verified; Android integration not ready.** `sales.submit`
 accepts one optional `promotions` JSON object/null, serializes it as compact deterministic UTF-8
 JSON with a 64 KiB cap, and passes it opaquely to
 `custom_selling_additional_pending_promotions`; promotion-only sales may use `items: []`, while
@@ -28,9 +28,18 @@ invoice/selection/fact. `test_sale_task9` 71 OK ×2. Permission path is one exac
 and `test_promotion_contracts` 5 OK. Source contracts 43 OK, authentication 39 OK. Lifecycle mutation
 killed the focused test; Ruff 0.14.10 and diff checks clean. D12 final state: flag 0 and zero selling
 Item Prices across Promotion parents. Independent adversarial review PASS, Critical 0 / Important 0.
-Implementation is complete; exact-path commit and feature-branch push were authorized on 2026-08-26
-for this packaging step. Final commit hashes are reported externally to avoid a self-referential
-checkpoint commit. Deploy remains unauthorized. Full brief and ledger: `docs/mobile-pos/promo-integration-handoff.md` and
+The backend sale extension is complete and merged. Both previously verified gaps are now closed:
+
+1. `mobile_pos/auth_hook.py` allows bearer access only to 17 exact `roti_ropi_pos.api.v1.*` paths. A
+   mobile-only cashier cannot reach the three `selling_additional` promotion facades through HTTP.
+   `test_pos_promo_api` calls Python functions directly and bypasses this hook.
+2. `sales.quote_cart` rejects `promotions`. `quote_promotion.total_price` does not supply authoritative
+   POS Invoice tax, rounding, `grand_total`, `payable`, or payment policy. Android cannot safely build
+   `client_accepted_grand_total` and exact payments for promotion-only or mixed carts.
+
+Deploy remains unauthorized. Status and exit evidence:
+`docs/mobile-pos/promo-integration-handoff.md`; Android file map and gated sequence:
+`/Users/rotiropi/POS_Android/docs/dynamic-promotion-integration-handoff.md`. Historical execution ledger:
 `.superpowers/sdd/promo-integration-handoff/progress.md`.
 
 Previous state: the browser-logout fix itself is complete at `e593491`: exact Frappe website
@@ -43,25 +52,7 @@ The Desk POS promotion picker batch is committed (selling_additional `666f5de`, 
 promotion parent — `28e53m5gfj` no longer exists (removed outside that session, likely via desk), so
 PROMO-00001 re-saves are unblocked. The MVP-vs-future boundary lives in design §16; the next phase
 awaits operator direction.
-**Resume point:** Dynamic Promotion MVP (Tasks 1-7) complete and committed through `4eaebde`;
-the operator-directed Desk POS promotion picker and parent-click interception committed as
-`666f5de`: `overrides/pos_promo_api.py` (3 whitelisted wrappers outside the promotions package,
-permission-gated), `public/js/pos_promotions.js` (page-scoped picker writing only the
-pending-payload field; engine materializes at checkout draft save; intercepts parent-item clicks
-into the picker with idempotent guard installation against the async controller timing),
-`hooks.page_js` a 2-entry list with the `test_hooks` pin updated accordingly, guide §8,
-`.eslintrc` global, new `test_pos_promo_api.py` (7 tests, GREEN ×2). E2E measured earlier:
-PROMO-00001 sold at 27.000 via dialog quote inside a mixed cart → ACC-PSINV-2026-00001 submitted
-at 35.000 with correct Model C rows and NO parent Item Price created; complete return
-ACC-PSINV-2026-00002 (-35.000) passed the return guard and wrote negated facts for the same
-instance id. Demo prep on promo-mvp stands: POS Profile "Kasir JURI" matching the promotion
-outlet, customer Walk In JURI, prices for the four physical items, stock MAT-STE-2026-00002,
-POS Settings invoice_type "POS Invoice". Measured ERPNext v16 facts recorded in AGENTS Keputusan
-Kunci: a user may hold only one open POS Opening Entry (an operator shift left open fails every
-suite's `_open_shift()`), closing cannot consolidate a sale together with its full return in one
-shift, and merge logs run as background jobs requiring the committed closing entry — the demo
-shift was therefore closed with an intentionally empty transaction list (invoices stay
-Paid/unconsolidated).
+**Resume point — Both blockers closed (2026-08-27):** The exact bearer-route contract and the authoritative promotion-aware quote are now closed with executable evidence (see `docs/mobile-pos/promo-integration-handoff.md` and the Android handoff). The three promo facades are POST-only (matching `frappe.xcall()`), require an enabled POS Profile assigned via `applicable_for_users`, and keep generic routes blocked. The quote lifecycle reuses the same `before_validate` providers as submit. Android transport and UI implementation may now start from `/Users/rotiropi/POS_Android/docs/dynamic-promotion-integration-handoff.md`. Deploy remains not authorized.
 
 The app-ownership extraction project (Phases 0-3) is complete; its record below stays as history.
 
@@ -350,11 +341,14 @@ Phase 2 implementation is committed in all three implementation repositories (`0
 
 ## 10. Resume here
 
-Mobile POS × Dynamic Promotion implementation, permission, docs, focused verification, and final
-independent review are complete. Do not repeat backup/migrate or D12 mutation: authorized migrate on
-`selling-cutover.localhost` already exited 0, recovery point is `20260826_114814`, and
-`auto_insert_price_list_rate_if_missing` is now 0. Exact-path commit and feature-branch push are the
-current authorized packaging step. No deploy is authorized.
+Mobile POS Dynamic Promotion sale payload, lifecycle materialization, read-only Promotion permission,
+and replay behavior are complete. Do not repeat backup/migrate or D12 mutation: the authorized migrate
+on `selling-cutover.localhost` exited 0, recovery point is `20260826_114814`, and
+`auto_insert_price_list_rate_if_missing` is 0.
+
+Next work is backend-only: close the exact bearer-route blocker, then add an authoritative
+promotion-aware cart quote. Do not start Android payment or submission integration before both contracts
+have executable evidence. No deploy is authorized.
 
 Historical Phase 3 resume record follows.
 

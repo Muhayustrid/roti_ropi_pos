@@ -50,7 +50,29 @@
 - **Proposed**: The hook rejects generic `/api/method`, `/api/resource`, v2, RPC, upload, and Desk API traffic for that role. Static unauthenticated assets are irrelevant to the native client.
 - **Proposed**: The hook compares Werkzeug's decoded `request.path` to exact entries. It never uses prefix, substring, query parameter, or client-supplied command matching.
 - **Proposed**: Non-mobile users remain governed by normal Frappe behavior; this hook does not attempt to secure all ERPNext whitelisted helpers globally.
-- **Inferred**: A stolen mobile bearer token can reach only the facade because `Mobile POS Cashier` does not require broad ERPNext roles and the route gate blocks generic APIs.
+- **Inferred**: A stolen mobile bearer token can reach only the approved Mobile POS v1 methods because `Mobile POS Cashier` does not require broad ERPNext roles and the route gate blocks generic APIs.
+
+### Dynamic Promotion Route Status — CLOSED (2026-08-27)
+
+Dynamic Promotion facade methods are now reachable as exact Mobile POS bearer routes.
+
+- **Verified**: `MOBILE_POS_METHODS` now contains 20 exact method identities (17 `roti_ropi_pos.api.v1.*` + 3 `selling_additional.overrides.pos_promo_api.*`). `MOBILE_POS_PATHS` derives their exact `/api/method/...` paths.
+- **Verified**: A promotion facade request now enters the bearer-gated set. `validate_mobile_api_scope` validates Bearer, client, token status/expiry, enabled user, and `Mobile POS Cashier`, then checks the exact path and `cmd` absence before allowing the dispatch.
+- **Verified**: The `Mobile POS Cashier` Promotion read-only DocPerm does not bypass the route gate; the route gate and the facade scope are both required.
+- **Verified**: `selling_additional.tests.test_pos_promo_api` proves DocPerm, enabled, and assigned checks directly; `roti_ropi_pos.tests.test_promo_bearer_route` proves the full HTTP dispatch pipeline including `auth_hooks`, wrong client, expired token, disabled user/role, missing/unassigned/disabled profile, method allowlist, and generic route blocking.
+- **Implemented**: Android may now call the three facades through the configured Mobile POS bearer (POST-only).
+
+Implemented backend (not yet deployed):
+
+1. The three exact facade identities and paths are allowlisted in `MOBILE_POS_METHODS`/`MOBILE_POS_PATHS`.
+2. Bearer checks (client, active token, enabled user, `Mobile POS Cashier`, Bearer scheme) remain.
+3. All three mobile calls require `pos_profile`.
+4. The facade resolves an enabled POS Profile assigned to the authenticated cashier through `applicable_for_users` (Administrator bypasses assignment for existing Desk tests; mobile tests enforce it).
+5. Promotion read-only permission is retained; detail for an ineligible promotion returns `eligibility.is_eligible == false` (fail-closed) and quote/submit reject ineligible promotions.
+6. All three facades are now `@frappe.whitelist(methods=["POST"])`, matching Desk POS `frappe.xcall()`.
+7. Generic RPC, `/api/resource`, `/api/v2`, `cmd=`, aliases, encoded, and trailing-path variants remain blocked (proven).
+8. Real HTTP tests for all three exact POST methods exist and pass twice.
+9. Valid, wrong client, expired, disabled, wrong role, missing/unassigned/disabled profile, and unapproved methods are all tested.
 
 ## Authorization Model
 

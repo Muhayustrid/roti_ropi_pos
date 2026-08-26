@@ -28,6 +28,10 @@ MOBILE_POS_METHODS = {
 	"roti_ropi_pos.api.v1.closing.submit",
 	"roti_ropi_pos.api.v1.closing.recover",
 	"roti_ropi_pos.api.v1.closing.status",
+	# Dynamic Promotion facades — exact bearer routes, POST-only, enabled+assigned profile required
+	"selling_additional.overrides.pos_promo_api.get_available_promotions",
+	"selling_additional.overrides.pos_promo_api.get_promotion_detail",
+	"selling_additional.overrides.pos_promo_api.quote_promotion",
 }
 
 MOBILE_POS_PATHS = {f"/api/method/{method}" for method in MOBILE_POS_METHODS}
@@ -89,7 +93,7 @@ def _basic_username(authorization: str) -> str | None:
 	try:
 		encoded = authorization.split(" ", 1)[1]
 		return base64.b64decode(encoded, validate=True).decode().split(":", 1)[0]
-	except (binascii.Error, UnicodeDecodeError, IndexError):
+	except binascii.Error, UnicodeDecodeError, IndexError:
 		return None
 
 
@@ -140,11 +144,15 @@ def validate_mobile_api_scope() -> None:
 	if _is_mobile_only_account(user):
 		method = getattr(frappe.request, "method", "GET")
 		command = frappe.form_dict.get("cmd")
-		if path not in MOBILE_POS_BROWSER_PATHS and (
-			method,
-			path,
-			command,
-		) not in MOBILE_POS_CASHIER_EXACT_ROUTES:
+		if (
+			path not in MOBILE_POS_BROWSER_PATHS
+			and (
+				method,
+				path,
+				command,
+			)
+			not in MOBILE_POS_CASHIER_EXACT_ROUTES
+		):
 			raise frappe.PermissionError("This account may access only the Mobile POS API.")
 
 

@@ -4,8 +4,8 @@
 persistence, or recovery code. It is the single Android-facing entry point for the `roti_ropi_pos`
 Mobile POS gateway.
 
-**Status:** audited against runtime source on 2026-08-19. Runtime source and its executable tests are
-the authority. Where an older document disagreed with runtime, this file follows runtime.
+**Status:** audited against runtime source on 2026-08-26. Runtime source and its executable tests are
+the authority. The 20 Mobile POS methods are available (17 v1 + 3 Dynamic Promotion facades, POST-only). The Dynamic Promotion sale field and authoritative combined quote are now available; see §7.18 for the closed route and quote contracts.
 
 **Companion documents** (this guide does not repeat them):
 
@@ -34,9 +34,8 @@ Anything not stated here, or not stated in `api-contract.md`, is **not** part of
 
 ## 2. Non-negotiable architecture rules
 
-1. **The gateway is the only API surface.** Android calls the 17 whitelisted `roti_ropi_pos.api.v1.*`
-   methods and the OAuth routes. Every other Frappe or ERPNext route is rejected by the auth hook for
-   a Mobile POS bearer token, including `/api/resource/*`, `/api/v2/*`, and any `cmd=` dispatch.
+1. **The current gateway surface is exact for dedicated mobile-only cashiers.** Android uses an account
+   with only `Mobile POS Cashier`. That account may call the 20 whitelisted methods (17 `roti_ropi_pos.api.v1.*` + 3 `selling_additional.overrides.pos_promo_api.*` POST-only) and OAuth routes. Other routes are rejected. A user with a desk-access role follows normal Frappe authorization and must never be provisioned as an Android cashier. See §7.18 for the Dynamic Promotion facade and quote contracts (now closed).
 2. **The server owns all money, stock, tax, and accounting truth.** Android sends intent, renders the
    server's answer. See §16.
 3. **Every mutation is idempotent and durable.** Four endpoints require `X-Idempotency-Key`; the key
@@ -123,7 +122,7 @@ merged into the business error enum in §14.
 
 | Route | Method | Purpose |
 | --- | --- | --- |
-| `/api/method/login` | POST | Browser login form inside the system WebView (`cmd=login`) |
+| `/api/method/login` | POST | Login form inside the system browser or secure Custom Tab authorization session (`cmd=login`), never an app-controlled WebView |
 | `/api/method/frappe.integrations.oauth2.authorize` | GET | Authorization request; `code_challenge` and `code_challenge_method=S256` are mandatory |
 | `/api/method/frappe.integrations.oauth2.approve` | GET/POST | Consent; same PKCE requirement |
 | `/api/method/frappe.integrations.oauth2.get_token` | POST | Code→token and refresh-token exchange |
@@ -201,7 +200,7 @@ Run this exact order on every cold start and after every token refresh:
 
 ## 7. Complete endpoint reference
 
-17 endpoints exist. This is the whole surface; there is no eighteenth.
+Twenty endpoints are currently allowed (17 `roti_ropi_pos.api.v1.*` + 3 `selling_additional.overrides.pos_promo_api.*` POST-only). This section is the complete v1 gateway surface. The three promotion facades are now allowlisted as POST-only (see §7.18) and are part of the allowed surface.
 
 All decimal money and quantity values are **JSON strings** in `ascii_decimal_dot` syntax
 (`"12500.00"`), never JSON numbers. Send them as strings and parse them into a decimal type — never a
@@ -498,7 +497,7 @@ the line price. Never recompute `rate` from `price_list_rate` and `discount_perc
 
 `pos_profile` and a non-empty `items` are required. `customer`, `walk_in_customer_name` optional;
 per row, `batch_no` and `serial_numbers` optional (`serial_numbers` defaults to `[]`, duplicates are
-rejected).
+rejected). This endpoint now accepts an optional `promotions` object/null (same shape as `sales.submit`, 64 KiB, opaque). A promotion-only quote may send `items: []` when `promotions` is non-null; plain quotes still require non-empty `items`. It returns authoritative `grand_total`, `payable`, taxes, and payment policy for regular, promotion, and mixed carts.
 
 - **Response `data`:**
 
@@ -553,12 +552,38 @@ zero, otherwise `grand_total`). Settle against `payable`, never against `grand_t
   ],
   "payments": [
     { "mode_of_payment": "Cash", "amount": "26400.00", "reference_no": null }
+  ],
+  "promotions": null
+}
+```
+
+Required: `pos_profile`, `client_accepted_grand_total`, and non-empty `payments`.
+Optional: `customer`, `walk_in_customer_name`, `promotions`; per payment row, `reference_no`.
+`promotions` accepts a JSON object or `null` and is limited to 64 KiB after compact deterministic UTF-8
+serialization. Omission or `null` preserves plain-sale behavior. A plain sale requires non-empty `items`.
+A promotion-only sale may send `items: []` only when `promotions` is non-null.
+
+Canonical promotion value:
+
+```json
+{
+  "instances": [
+    {
+      "promotion": "PROMO-00001",
+      "selections": [
+        {
+          "choice_group_key": "grp_example",
+          "options": [{ "option_id": "option-row-name", "qty": 1 }]
+        }
+      ]
+    }
   ]
 }
 ```
 
-Required: `pos_profile`, `client_accepted_grand_total`, non-empty `items`, non-empty `payments`.
-Optional: `customer`, `walk_in_customer_name`; per payment row, `reference_no`.
+`roti_ropi_pos` passes this object opaquely to the POS Invoice lifecycle. `selling_additional` validates
+and materializes Model C rows. The response remains the standard `SaleDetail`; no new response field or
+error code exists. The normalized value participates in the idempotency hash.
 `walk_in_customer_name` is accepted **only** when the resolved customer is the profile default —
 otherwise `INVALID_REQUEST` with `reason: "This field is accepted only for profile default Customer."`
 
@@ -750,13 +775,13 @@ is the `row_id` from `sales.get`. A duplicate `source_item_row` is `INVALID_REQU
     "allowed_refund_modes": [ { "mode_of_payment": "Cash" } ],
     "refund_mode_required": false,
     "selected_refund_mode": "Cash",
-    "refund_allocations": [ { "mode_of_payment": "Cash", "amount": "13200.00", "reference_no": null } ]
+    "refund_allocations": [ { "mode_of_payment": "Cash", "amount": "-13200.00", "reference_no": null } ]
   }
 }
 ```
 
-`refund_amount` is positive; `items[].qty`, `amount`, and the totals are negative. Display
-`refund_amount`. Never derive the refund from the line rates.
+`refund_amount` is positive for display. `items[].qty`, item amounts, totals, and
+`refund_allocations[].amount` are negative. Never derive the refund from the line rates.
 
 ### 7.13 `sales.create_return`
 
@@ -958,6 +983,36 @@ All three fields required. `closing_balances` must contain **exactly** the modes
   `PROFILE_SCOPE_MISMATCH` 403. A name that does not exist at all raises Frappe's native
   document-not-found response **without** a v1 envelope; handle it as a transport-level 404, not as
   `RESOURCE_NOT_FOUND`.
+
+### 7.18 Dynamic Promotion status — CLOSED (2026-08-27)
+
+| Operation | Backend status | Android status |
+| --- | --- | --- |
+| Optional `sales.submit.promotions` field | Implemented and tested | **Available:** use with `sales.quote_cart` authoritative totals |
+| Three `selling_additional.overrides.pos_promo_api` facades | Implemented POST-only, 20 allowlist, enabled+assigned via `_check_access` | **Available:** POST-only with valid bearer and assigned POS Profile |
+| Promotion-only or mixed-cart authoritative quote | Implemented via `sales.quote_cart` with `promotions` | **Available:** use authoritative `sales.quote_cart` for `grand_total`/`payable` |
+
+Implemented facade paths:
+
+```text
+/api/method/selling_additional.overrides.pos_promo_api.get_available_promotions
+/api/method/selling_additional.overrides.pos_promo_api.get_promotion_detail
+/api/method/selling_additional.overrides.pos_promo_api.quote_promotion
+```
+
+All three facades are now `@frappe.whitelist(methods=["POST"])`, preserving the Desk POS `frappe.xcall()` (POST) consumer.
+
+These facades return native Frappe `{ "message": ... }` responses, not the v1 envelope. `Mobile POS
+Cashier` has read-only Promotion permission. Facade checks now enforce Promotion read + POS Profile enabled/assigned via `applicable_for_users` (Administrator bypass for Desk), and require `pos_profile` for all three (including detail). `MOBILE_POS_METHODS` now contains 20 exact methods (17 v1 + 3 promo POST-only) and `MOBILE_POS_PATHS` derives from them; real HTTP tests prove the full dispatch pipeline.
+
+`quote_promotion.total_price` is package pricing only and must not become `client_accepted_grand_total`. `sales.quote_cart` now accepts the same optional `promotions` object/null as `sales.submit` and returns authoritative tax, rounding, `grand_total`, `payable`, and payment policy for regular, promotion-only, and mixed carts.
+
+**Note:** The Dynamic Promotion route and combined-quote blockers are now closed. The hard stop below is retired; payment and `sales.submit` for a Dynamic Promotion cart are now allowed via the authoritative quote. Bearer tests prove the three exact facade routes and a backend quote returns authoritative promotion-only
+and mixed-cart totals plus payment policy.
+
+Deployment also requires `selling_additional`, a recorded backup before migrate,
+`auto_insert_price_list_rate_if_missing = 0`, and zero selling Item Price rows for every Promotion parent
+item. See `/Users/rotiropi/POS_Android/docs/dynamic-promotion-integration-handoff.md`.
 
 ## 8. Catalog, customer, and quote flow
 
@@ -1449,9 +1504,9 @@ Deleting first and crashing loses the receipt and leaves an unknown server state
 
 - Model money and quantities as decimal strings on the wire and a decimal type in memory. **Never a
   `float`/`Double`.** JSON floats lose cents.
-- Model `rejection_reason`, `lifecycle_state`, `closing.status`, and `error.code` as sealed enums with an
-  explicit `Unknown(raw: String)` case. A new server value must not crash the parser, and it must not be
-  silently mapped onto an existing case either.
+- Model `rejection_reason`, `lifecycle_state`, `closing.status`, and `error.code` as TypeScript string
+  unions or discriminated unions with an explicit unknown value that retains the raw string. A new server
+  value must not crash the parser or map silently onto an existing case.
 - Keep the response envelope (`ok`, `data`, `error`, `meta`) as one generic wrapper type. Read
   `meta.replayed` — it distinguishes "just created" from "recovered", which changes the UI copy.
 - Never model a field this document does not list. An unknown extra field in a response should be
@@ -1524,7 +1579,9 @@ Auth and transport
 
 - [ ] Authorization Code + PKCE `S256`; `code_challenge` always sent; no client secret anywhere
 - [ ] `Authorization: Bearer` on every gateway call; no cookies, no API key
-- [ ] Only the 17 canonical dotted-path routes are called; no `/api/resource`, no `/api/v2`, no `cmd=`
+- [x] Only currently allowed exact routes are called; now 20 methods (17 v1 + 3 promo POST-only) and OAuth routes
+- [x] Dynamic Promotion facades are now allowlisted and POST-only; real HTTP bearer tests pass
+- [ ] No `/api/resource`, `/api/v2`, generic RPC, alternate path, or `cmd=` dispatch is used
 - [ ] `message` unwrapped; `ok` / `data` / `error` / `meta` handled generically
 - [ ] Native pre-dispatch failures (401/403/404/429/500/503 without an envelope) classified separately
       from `error.code`
@@ -1532,7 +1589,8 @@ Auth and transport
 Money and correctness
 
 - [ ] Every decimal is a string on the wire and a decimal type in memory; no floats
-- [ ] Line prices come only from `catalog.quote_item`; cart totals only from `sales.quote_cart`
+- [ ] Regular line prices come only from `catalog.quote_item`; regular cart totals only from `sales.quote_cart`
+- [x] Dynamic Promotion payment now uses the authoritative combined quote (`sales.quote_cart` with `promotions`)
 - [ ] Settlement is against `payable`, exactly, with no change and no partial payment
 - [ ] `client_accepted_grand_total` is the latest quote's `grand_total`
 - [ ] `PRICE_CHANGED` replaces local totals and forces cashier re-confirmation with a new key
@@ -1612,7 +1670,7 @@ around the current runtime, not around a promised fix.
 If this document and `api-contract.md` do not state it, it does not exist. When something is missing,
 stop and ask a backend owner — do not fill the gap with an assumption.
 
-1. **Do not guess endpoint names.** The 17 in §7 are the whole surface.
+1. **Do not guess endpoint names.** The 20 in §7 are the currently allowed gateway surface (17 v1 + 3 promo POST-only). The promotion facades are now allowlisted per §7.18.
 2. **Do not guess HTTP methods.** `catalog.scan` and `catalog.quote_item` are **POST**. `closing.recover`
    is **POST**. Everything read-only in §7 is GET except `sales.quote_cart` and `sales.quote_return`,
    which are POST.
@@ -1627,10 +1685,12 @@ stop and ask a backend owner — do not fill the gap with an assumption.
 8. **Do not guess a total.** Any number the cashier sees before payment must come from a server quote.
 9. **Do not guess closing state.** Use the §13.8 table; when in doubt, `closing.recover` or poll.
 10. **Do not guess that a timeout means failure.** It means unknown. Replay the key.
+11. **Do not derive a promotion checkout total.** `quote_promotion.total_price` is not POS Invoice tax,
+    rounding, `grand_total`, `payable`, or payment authority. Stop at §7.18.
 
 ## Rules for Android AI Agents
 
-These eleven rules are binding on any AI agent modifying the Android client.
+These twelve rules are binding on any AI agent modifying the Android client.
 
 1. **Do not call raw Frappe DocType APIs** (`/api/resource/*`, `frappe.client.*`, `/api/v2/*`) when the
    gateway already covers the capability. The auth hook rejects them for a Mobile POS token, and a route
@@ -1652,9 +1712,12 @@ These eleven rules are binding on any AI agent modifying the Android client.
    `closing_failed`, submitting again is forbidden. Poll and escalate.
 9. **Do not treat Android-computed totals as authoritative.** A local sum is a preview. The server's
    `payable`, `grand_total`, `refund_amount`, and `expected_amount` are the only real numbers.
-10. **Do not bypass the gateway using ERPNext endpoints** unless this contract explicitly names the
-    route. The only non-gateway routes Android may call are the four OAuth routes in §4.
-11. **Read this document before modifying Android networking, domain, or recovery code.** If a change
+10. **Do not bypass the gateway using ERPNext endpoints.** A dedicated mobile-only cashier may call the
+    20 exact routes (17 v1 + 3 promo POST-only) and the four OAuth routes. Never add a desk-access role to an Android cashier.
+    The promotion facades are now allowlisted per §7.18.
+11. **Do not implement promotion payment from separate local sums.** Wait for one authoritative backend
+    quote covering regular-only, promotion-only, and mixed carts.
+12. **Read this document before modifying Android networking, domain, or recovery code.** If a change
     seems to require a behaviour this document does not describe, the change is wrong or the backend
     needs a contract update first — raise it, do not improvise.
 

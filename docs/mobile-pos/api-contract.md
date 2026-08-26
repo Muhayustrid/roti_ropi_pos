@@ -594,6 +594,7 @@
 - **Approved**: Server-authoritative full-cart snapshot at response time. The
   endpoint is read-only, non-binding, and explicitly does not lock stock,
   create POS Invoices, or write any durable Mobile POS Request.
+- **Approved (2026-08-27)**: The endpoint accepts the same optional `promotions` object/null as `sales.submit` (see `sales.submit` extension). A promotion-only quote may send `items: []` when `promotions` is non-null; a plain quote still requires non-empty `items`. The same 64 KiB and `INVALID_REQUEST` contract applies. `selling_additional` owns validation/materialization; `roti_ropi_pos` treats it as opaque.
 - **Approved**: The endpoint requires an active opening owned by the
   authenticated cashier for the selected POS Profile. If none exists, it
   returns `NO_OPEN_SESSION` with the selected `pos_profile` in `details`.
@@ -691,9 +692,29 @@
 - **Proposed**: Reject client-supplied accounts, rates, discounts, tax rows, company, warehouse, owner, posting status, paid totals, and document names.
 - **Proposed**: Rebuild rows against current profile/customer context and submit one POS Invoice.
 - **Proposed**: If `client_accepted_grand_total` differs from the authoritative total, return `PRICE_CHANGED` with the new summary and create no invoice.
-- **Approved — additive v1 extension (2026-08-26)**: `promotions` is one optional request-only JSON object or `null`; omission preserves the existing plain-sale behavior. The server serializes it as compact deterministic UTF-8 JSON, rejects serialized content above 64 KiB with the existing `INVALID_REQUEST` envelope, and passes it opaquely through `POS Invoice.custom_selling_additional_pending_promotions`. `roti_ropi_pos` does not validate the internal promotion shape and exposes no new response fields or error codes. A promotion-only sale may send `items: []`; a plain sale still requires a non-empty `items` array. The normalized payload participates in the existing idempotency hash.
-- **Approved**: Deployment prerequisite for this extension: back up and migrate `selling_additional` before serving the integrated API, then keep `auto_insert_price_list_rate_if_missing = 0` so promotion parent items never gain selling Item Prices (D12).
-- **Approved**: Android discovers and quotes promotions through `selling_additional.overrides.pos_promo_api` endpoints; `sales.quote_cart` remains unchanged and rejects `promotions`.
+- **Approved — additive v1 extension (2026-08-26)**: `promotions` is one optional request-only JSON object or `null`; omission preserves the existing plain-sale behavior. The server serializes it as compact deterministic UTF-8 JSON, rejects serialized content above 64 KiB with the existing `INVALID_REQUEST` envelope, and passes it opaquely through `POS Invoice.custom_selling_additional_pending_promotions`. `roti_ropi_pos` does not validate the internal promotion shape; `selling_additional` owns semantic validation and materialization. No response field or error code changes. A promotion-only sale may send `items: []`; a plain sale still requires a non-empty `items` array. The normalized payload participates in the existing idempotency hash.
+
+  Canonical inner shape:
+
+  ```json
+  {
+    "instances": [
+      {
+        "promotion": "PROMO-00001",
+        "selections": [
+          {
+            "choice_group_key": "grp_example",
+            "options": [{"option_id": "option-row-name", "qty": 1}]
+          }
+        ]
+      }
+    ]
+  }
+  ```
+
+- **Approved**: Deployment prerequisite for this extension: back up and migrate `selling_additional` before serving the integrated API, keep `auto_insert_price_list_rate_if_missing = 0`, and verify that Promotion parent items have no selling Item Price rows (D12).
+- **Implemented (2026-08-27)**: Three `selling_additional.overrides.pos_promo_api` facades are now allowlisted as exact Mobile POS bearer routes and POST-only. `mobile_pos/auth_hook.py` now contains 20 exact methods (17 + 3) and `MOBILE_POS_PATHS` derives from them. Real HTTP tests in `roti_ropi_pos.tests.test_promo_bearer_route` prove the Frappe dispatch pipeline including `auth_hooks`; `selling_additional.tests.test_pos_promo_api` proves the facade permission and assignment checks.
+- **Implemented (2026-08-27)**: `sales.quote_cart` now accepts the same optional `promotions` object/null as `sales.submit` (compact deterministic UTF-8, 64 KiB, opaque in `roti_ropi_pos`). It returns authoritative `grand_total`, `payable`, `taxes`, `payment_modes`, and `payment_amount_policy` for regular-only, promotion-only (`items: []` allowed with non-null promotions), and mixed carts via the shared `before_validate` lifecycle. `quote_promotion.total_price` remains non-authoritative. Dynamic Promotion checkout is now unblocked for transport/UI work.
 - **Approved**: Null or omitted `customer` resolves to `POS Profile.customer`.
 - **Approved**: A supplied Customer must already exist, be enabled, pass normal read permissions, and satisfy the same authorized-profile Customer predicate used by `customers.search`.
 - **Approved**: The configured default Customer passes those same checks after its name is resolved from the POS Profile. A missing, disabled, permission-inaccessible, or predicate-ineligible default returns `PROFILE_CONFIGURATION_INVALID`; it is never trusted merely because it came from the profile.

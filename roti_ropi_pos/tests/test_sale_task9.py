@@ -378,6 +378,7 @@ class TestSalePayloadDecimalParser(IntegrationTestCase):
 		)
 
 	def test_quote_cart_parser_rejects_promotions_field(self):
+		# Updated for Task B: quote_cart now accepts optional promotions object
 		payload = {
 			"pos_profile": "ignored",
 			"customer": None,
@@ -393,10 +394,9 @@ class TestSalePayloadDecimalParser(IntegrationTestCase):
 			],
 			"promotions": {"instances": []},
 		}
-		with self.assertRaises(MobilePOSAPIError) as error:
-			sales_api._parse_quote_payload(payload)
-		self.assertEqual(error.exception.code, "INVALID_REQUEST")
-		self.assertEqual(error.exception.details["field"], "promotions")
+		parsed = sales_api._parse_quote_payload(payload)
+		self.assertIn("promotions", parsed)
+		self.assertIsInstance(parsed["promotions"], str)
 
 
 class TestVerifyExactSettlement(IntegrationTestCase):

@@ -13,16 +13,18 @@ This document gives a new Android implementation session enough backend context 
 
 ERPNext remains authoritative for POS Profile, Customer, Item, pricing, taxes, stock, batches, serials, POS Opening Entry, POS Invoice, returns, closing, consolidation, and accounting. Android must not duplicate those rules.
 
-Android is outside this repository and should be built separately in:
+Android is outside this repository and lives in:
 
 ```text
-/Users/rotiropi/DockerERPNext/POSERPNext
+/Users/rotiropi/POS_Android
 ```
+
+That client uses Expo SDK 57, Expo Router, React Native 0.86.2, React 19.2.3, strict TypeScript 6.0.3, and Jest 29 with `ts-jest`. It is currently local and mock-only. Read its `docs/dynamic-promotion-integration-handoff.md` before any Dynamic Promotion work.
 
 ## Runtime Requirements
 
 - Frappe and ERPNext v16.
-- Required apps: `erpnext`, `stock_additional`, and `roti_ropi_pos`.
+- Required apps: `erpnext`, `stock_additional`, `selling_additional`, and `roti_ropi_pos`.
 - **POS Settings > Invoice Type** must be `POS Invoice`.
 - HTTPS base URL.
 - Redis workers must run for queued closing consolidation.
@@ -151,16 +153,31 @@ Authentication, route-hook, malformed-route, rate-limit, and some server failure
 | GET | `catalog.search` | Search scoped items using `pos_profile`, `q`, optional `item_group`, `start`, and `limit`. |
 | POST | `catalog.scan` | Send `pos_profile` and scanned `value`. |
 | POST | `catalog.quote_item` | Send profile, item, quantity, UOM, optional customer and batch. Treat quote as UI snapshot. |
-| POST | `sales.submit` | Send accepted total, item identities/selections, and payments. Server rebuilds authoritative invoice. |
+| POST | `sales.quote_cart` | Quote authoritative totals for regular-only, promotion-only, and mixed carts. Supports optional `promotions` object/null (64 KiB, opaque). |
+| POST | `sales.submit` | Send accepted total, item identities/selections, payments, and optional opaque `promotions`. Server rebuilds authoritative invoice. |
 | GET | `sales.get` | Read scoped POS Invoice detail by `name`. |
 | GET | `sales.list` | Read scoped history by profile/status/query/pagination. |
 | POST | `sales.quote_return` | Preview server-calculated return totals and refund allocation; no idempotency key or artifacts. |
 | POST | `sales.create_return` | Send source POS Invoice, reason, source row IDs, quantities, and conditional allowed refund mode only. |
 | GET | `closing.preview` | Load server-derived opening, invoice count, total, and expected payments. |
 | POST | `closing.submit` | Send profile and counted closing balances. |
+| POST | `closing.recover` | Adopt an existing mobile-owned closing after the original key is lost. |
 | GET | `closing.status` | Poll scoped closing by `name` while status is `queued`. |
 
-No v1 health, cancellation, Customer mutation, closing-retry, upload, generic resource, Desk, or generic RPC endpoint exists.
+These 20 methods (17 `roti_ropi_pos.api.v1.*` + 3 POST-only `selling_additional.overrides.pos_promo_api.*`) are the complete currently allowed gateway surface. No v1 health, cancellation, Customer mutation, closing-retry, upload, generic resource, Desk, or generic RPC endpoint exists.
+
+## Dynamic Promotion Status — CLOSED (2026-08-27)
+
+The optional `sales.submit.promotions` field is implemented and tested. It carries one opaque object to the `selling_additional` POS Invoice lifecycle. The standard `SaleDetail` response and error enum remain unchanged.
+
+Android Dynamic Promotion checkout is now ready:
+
+1. The Mobile POS auth hook now allowlists 20 exact method paths: 17 v1 + 3 `selling_additional.overrides.pos_promo_api` POST-only facades. `MOBILE_POS_PATHS` derives from `MOBILE_POS_METHODS`. A valid dedicated cashier bearer reaches all three exact POST paths; real HTTP tests in `roti_ropi_pos.tests.test_promo_bearer_route` prove the full dispatch pipeline. Promotion read-only DocPerm does not bypass the route gate — both gates are required.
+2. `sales.quote_cart` now accepts the same optional `promotions` object/null as `sales.submit` (compact deterministic UTF-8, 64 KiB, opaque). It returns authoritative `grand_total`, `payable`, taxes, rounding, and payment policy for regular-only, promotion-only, and mixed carts via the shared `before_validate` lifecycle. `quote_promotion.total_price` remains non-authoritative and must not become Android's accepted total.
+
+Direct Python facade tests prove permission scope; HTTP bearer tests prove route access. Android must use authoritative `sales.quote_cart` for `client_accepted_grand_total` and exact payments, never `quote_promotion.total_price`. Read `api-contract.md`, `authentication.md`, and `/Users/rotiropi/POS_Android/docs/dynamic-promotion-integration-handoff.md` before follow-up work.
+
+Deployment requires a recorded backup, a `selling_additional` migrate, `auto_insert_price_list_rate_if_missing = 0`, and zero selling Item Price rows for every Promotion parent item.
 
 ## Critical Request Shapes
 
@@ -294,7 +311,7 @@ Do not implement:
 - generic Frappe API access;
 - embedded secrets or shared credentials.
 
-Recommended Android responsibilities: encrypted token storage, typed DTOs, pending-action persistence, same-key retry, WorkManager network retry, status reconciliation, XML Views/ViewBinding UI, accessibility, and secure log redaction.
+Recommended Android responsibilities: approved Keystore-backed token storage, TypeScript DTOs, durable pending-action persistence, same-key retry, status reconciliation, Expo Router and React Native UI through the existing `PosContext` reducer/hooks and shared components, accessibility, responsive layouts, and secure log redaction. Select any background retry or storage dependency explicitly for Expo/React Native before implementation.
 
 ## Source References
 
