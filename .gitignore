@@ -53,3 +53,11 @@ jspm_packages/
 
 # Aider AI Chat
 .aider*
+
+# Local agent tooling and generated state
+.agents/
+.claude/
+.codegraph/
+.superpowers/
+.zcode/
+skills-lock.json

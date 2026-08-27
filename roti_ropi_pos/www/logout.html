@@ -1,0 +1,39 @@
+{% from "frappe/templates/includes/avatar_macro.html" import avatar %}
+{% extends "templates/web.html" %}
+{% block navbar %}{% endblock %}
+{% block footer %}{% endblock %}
+{% block page_content %}
+<script>
+	window.onload = function () {
+		frappe.call({
+			method: "logout",
+			callback: function (response) {
+				if (response.exc) {
+					return;
+				}
+				var resume = sessionStorage.getItem("mobile_pos_oauth_authorize_url");
+				sessionStorage.removeItem("mobile_pos_oauth_authorize_url");
+				if (!resume) {
+					window.location.href = "/login";
+					return;
+				}
+				var candidate;
+				try {
+					candidate = new URL(resume);
+				} catch (error) {
+					window.location.href = "/login";
+					return;
+				}
+				if (
+					candidate.origin !== window.location.origin ||
+					candidate.pathname !== "/api/method/frappe.integrations.oauth2.authorize"
+				) {
+					window.location.href = "/login";
+					return;
+				}
+				window.location.href = "/login?redirect-to=" + encodeURIComponent(candidate.href);
+			},
+		});
+	};
+</script>
+{% endblock %}
