@@ -1,7 +1,7 @@
 # PROJECT_STATE.md — AI session resume checkpoint
 
 **Last updated:** 2026-08-27. Mobile POS Dynamic Promotion sale extension is merged on `main` at
-`859e0b7`; `selling_additional` permission support is merged at `81346f0`. Both backend blockers for Android checkout are now closed with executable evidence (see below).
+`859e0b7`; `selling_additional` permission support is merged at `81346f0`. Both backend blockers for Android checkout are closed. Demo master data includes 127 business POS Profiles, 335 matched Items, and dedicated `Harga Ropi 12K` prices. Demo Promotion is unblocked: POS Settings uses `POS Invoice`, forbidden parent Item Price `p9ggtblaqn` is removed, and quote plus rollback-only materialization passed for `PROMO-00001` on `POS - RUP`.
 
 **ACTIVE — backend sale extension verified; Android integration not ready.** `sales.submit`
 accepts one optional `promotions` JSON object/null, serializes it as compact deterministic UTF-8
